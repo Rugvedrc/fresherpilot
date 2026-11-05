@@ -32,6 +32,12 @@ Telegram buttons / dashboard buttons ─▶ D1 `actions` ─▶ local app marks 
   is alerted once.
 - **Posting age.** LinkedIn and Indeed give only a date; every read asks for "posted in the last N
   minutes", and that window is saved with the job so alerts can say "< 32 min ago".
+- **Locations.** Cities from your settings, plus remote jobs, plus anything open to every city ("PAN India",
+  "Across India", "Virtual Drive"); LinkedIn "Remote" searches mark their jobs remote.
+- **Apply mode.** `easy` (apply inside the board: LinkedIn's on-site Apply button, Indeed Apply, Naukri's own
+  apply, Internshala, Wellfound) or `site` (company careers page), shown on every alert and filterable.
+- **Health.** Each cloud step records its last good read (`src_ok`, `src_err`); the reader records `gh_read`;
+  `pipelineStatus()` turns them into the Telegram `/status` and the dashboard's Pipeline tab.
 
 ## Local app
 

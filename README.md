@@ -7,7 +7,8 @@ within minutes of it being posted. A local web app shows everything, finds recru
 helps you apply with an ATS-aware autofill extension.
 
 Everything runs on free tiers: Cloudflare Workers, GitHub Actions, Groq and NVIDIA AI keys, and Apify's
-$5/month credit (for Naukri).
+$5/month credit (for Naukri). **Your computer can be off:** the cloud and the GitHub reader do the reading,
+checking and alerting; the local app is only for browsing, applying and outreach.
 
 ```
                  ┌──────────── runs 24/7, your PC can be off ────────────┐
@@ -45,7 +46,13 @@ no "new job" notifications, so frequent checking is as close to real time as it 
   out; several keys are used in parallel.
 - **Telegram alerts** with Apply / Applied / Seen / Not-for-me buttons, the real posting age, and one alert
   per job across boards (reposts within 30 days are skipped).
-- **Web dashboard** on the Worker, behind a password: approved jobs, the same buttons, stats per source.
+- **Phone or laptop?** Every alert says **📱 Easy Apply** (apply inside LinkedIn / Indeed / Naukri / Internshala /
+  Wellfound, fine on the phone) or **💻 Company site** (the company's careers page, easier on a laptop).
+- **Pipeline status** (`/status` in Telegram, *Pipeline* tab on the dashboard): when each source last read, new
+  jobs per hour, and every stage (ruled out by rules → rejected by the AI → approved → alerted), so a stall shows
+  at once.
+- **Web dashboard** on the Worker, behind a password: approved jobs (filter by Easy Apply / company site), the
+  same buttons, the pipeline status and stats per source.
 - **Local app** (`python main.py`): full job list and dashboard synced with the cloud (including its AI
   verdicts), a *Fetch new jobs* button, apply kit, recruiter contacts and outreach.
 - **Browser extension (MV3)**: autofills application forms. Written answers use the job description's
@@ -106,8 +113,9 @@ The cloud then starts the reader every 10 minutes; each run loops for almost 6 h
 
 ## Daily use
 
-1. **Telegram** brings new matching jobs on its own. `/jobs` shows the newest ones you haven't marked,
-   `/status` the last 24 hours, `/stop` and `/resume` pause alerts.
+1. **Telegram** brings new matching jobs on its own. `/easy` lists the newest unmarked Easy Apply jobs (do them on
+   the phone), `/site` the company-site ones (laptop), `/jobs` all of them, `/status` the pipeline, `/stop` and
+   `/resume` pause alerts.
 2. **Apply**: open the job and press **Alt+Shift+F** to autofill; review and submit.
 3. **Open the local app** when you want the full list, the apply kit, contacts and outreach; it pulls in
    everything the cloud found. *Fetch new jobs* reads every board once more right away.
