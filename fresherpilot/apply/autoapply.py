@@ -64,7 +64,23 @@ def eligible_jobs(include_with_instructions: bool = False) -> list[dict[str, Any
         job["uid"] = uid
         job["employer"] = contacts.resolve_company(job)
         out.append(job)
-    return _newest_first(out)
+    return _easy_first(_newest_first(out))
+
+
+# Easy Apply jobs go first (short in-site forms: LinkedIn Easy Apply, Naukri's own apply, Indeed Apply...), in this
+# board order; company-site applications (long ATS forms) last; unknown in between. Newest first within each group.
+_EASY_ORDER = {"LinkedIn": 0, "Naukri": 1, "Indeed": 2, "Internshala": 3, "Wellfound": 4}
+
+
+def _easy_first(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from fresherpilot.outreach.telegram_bot import apply_mode
+
+    def key(job: dict[str, Any]) -> tuple[int, int]:
+        mode = apply_mode(job)
+        group = 0 if mode == "easy" else 2 if mode == "site" else 1
+        return group, _EASY_ORDER.get(str(job.get("source")), 9) if group == 0 else 0
+
+    return sorted(jobs, key=key)  # stable: keeps newest first inside each group
 
 
 def start(uids: list[str] | None, max_jobs: int = 25) -> dict[str, Any]:
@@ -84,7 +100,7 @@ def start(uids: list[str] | None, max_jobs: int = 25) -> dict[str, Any]:
     with _lock:
         STATE.update(running=True, mode="single" if single else "bulk", queue=queue, total=len(queue), index=0,
                      applied=0, skipped=0, failed=0, current=None, waiting=None, command=None)
-    _log("start", None, f"{len(queue)} job(s) queued ({'this job' if single else 'best matches first'})")
+    _log("start", None, f"{len(queue)} job(s) queued ({'this job' if single else 'Easy Apply first, then newest'})")
     return {"queue": queue, "settings": SETTINGS, "mode": STATE["mode"]}
 
 
