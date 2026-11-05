@@ -150,7 +150,7 @@ async function takeSnapshot(tabId) {
     await sleep(1500);
     await ready(tabId).catch(() => null);
   }
-  throw new Error("Couldn't read the page (it kept reloading)");
+  throw new Error("Couldn't read the page (it kept reloading): moved on");
 }
 
 // Inject helpers and wait until the page is really ready (loaded, nothing spinning, DOM + network quiet).
@@ -277,6 +277,7 @@ async function applyJob(job, settings, mode, resumeTabId = null, token = null) {
     let submitted = false;
     let refills = 0;
     let rescanned = false;
+    let reloads = 0;
     const history = [];
     for (let step = 0; step < (settings.max_steps || 28); step++) {
       if (token && cancelled.has(token)) { parked = true; return { event: "skipped", detail: "timed out" }; }  // set aside meanwhile
@@ -285,9 +286,12 @@ async function applyJob(job, settings, mode, resumeTabId = null, token = null) {
         r = await ready(tabId);
       } catch (err) {
         if (!(await chrome.tabs.get(tabId).catch(() => null))) throw new Error("The tab was closed");
-        if (step < (settings.max_steps || 28) - 1 && /frame|removed|navigat|context|cannot access|no tab|error page/i.test(String(err.message || err))) {
+        if (/frame|removed|navigat|context|cannot access|no tab|error page/i.test(String(err.message || err))) {
+          // The page reloaded while we looked at it: look again, but only a few times (Internshala pages kept
+          // reloading in the background tab and each job hit the 6-min limit).
+          if (++reloads >= 3) return { event: "failed", detail: "the page keeps reloading (3 times): moved on" };
           await sleep(2000);
-          continue;  // the page reloaded while we looked at it: look again
+          continue;
         }
         throw err;
       }

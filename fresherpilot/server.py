@@ -1041,6 +1041,7 @@ def set_application(body: ApplicationRequest) -> dict:
 class AutoApplyRequest(BaseModel):
     uids: list[str] | None = None  # one job (its Auto-apply button) or None = best matches
     max: int = 0  # 0 = no limit
+    sources: list[str] | None = None  # only these platforms (LinkedIn, Naukri, Indeed...); None = all
 
 
 @app.post("/api/autoapply")
@@ -1048,9 +1049,16 @@ def start_autoapply(body: AutoApplyRequest) -> dict:
     from fresherpilot.apply import autoapply
 
     try:
-        return autoapply.start(body.uids, body.max)
+        return autoapply.start(body.uids, body.max, body.sources)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/autoapply/preview")
+def autoapply_preview() -> dict:
+    from fresherpilot.apply import autoapply
+
+    return autoapply.preview()
 
 
 @app.get("/api/autoapply")

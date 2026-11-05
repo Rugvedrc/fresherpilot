@@ -58,6 +58,9 @@ function render() {
   const emailed = s.log.filter((e) => e.event === "emailed").length;
   $("state").textContent = s.running ? (s.paused ? "⏸ Paused (set-aside jobs are still watched)" : "▶ Running in your browser") : "Not running";
   $("start").hidden = s.running;
+  $("platforms").hidden = s.running;
+  if (render.wasRunning && !s.running) loadPlatforms();  // counts change after a run
+  render.wasRunning = s.running;
   $("pause").hidden = !s.running || s.paused;
   $("resume").hidden = !s.running || !s.paused;
   $("stop").hidden = !s.running;
@@ -124,11 +127,41 @@ document.addEventListener("click", (e) => {
 $("pause").onclick = () => send("pause");
 $("resume").onclick = () => send("resume");
 $("stop").onclick = () => { if (confirm("Stop auto-apply? The job being applied right now is ended.")) send("stop"); };
+// Platform checkboxes: which boards to auto-apply on (remembered in this browser). Internshala starts unticked:
+// its pages kept reloading in the background tab (Nov 5), so those are best done by hand.
+const PLAT_KEY = "fp-autoapply-platforms";
+function savedPlatforms() {
+  try { return JSON.parse(localStorage.getItem(PLAT_KEY) || "null"); } catch (_) { return null; }
+}
+const ticked = () => [...document.querySelectorAll("#platforms input:checked")].map((x) => x.value);
+const savePlatforms = () => { try { localStorage.setItem(PLAT_KEY, JSON.stringify(ticked())); } catch (_) { /* private mode */ } };
+async function loadPlatforms() {
+  try {
+    const { platforms } = await (await fetch("/api/autoapply/preview")).json();
+    const saved = savedPlatforms();
+    $("platforms").innerHTML = platforms.length ? platforms.map((p) => {
+      const on = saved ? saved.includes(p.source) : p.source !== "Internshala";
+      return `<label class="plat"><input type="checkbox" value="${esc(p.source)}" ${on ? "checked" : ""}> <b>${esc(p.source)}</b>
+        <span class="small muted">${p.total} job${p.total === 1 ? "" : "s"}</span></label>`;
+    }).join("") + `<button class="chip" data-plat="all" type="button">All</button><button class="chip" data-plat="none" type="button">None</button>`
+      : `<span class="small muted">No approved jobs waiting to be applied to.</span>`;
+  } catch (_) { $("platforms").innerHTML = `<span class="small muted">Couldn't load the platforms.</span>`; }
+}
+document.addEventListener("change", (e) => { if (e.target.closest("#platforms")) savePlatforms(); });
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-plat]");
+  if (!b) return;
+  document.querySelectorAll("#platforms input").forEach((x) => (x.checked = b.dataset.plat === "all"));
+  savePlatforms();
+});
+
 $("start").onclick = async () => {
   if (!hasExtension()) return alert("The FresherPilot extension isn't active on this page. Reload it in chrome://extensions, then refresh this page.");
-  if (!confirm("Apply to ALL approved jobs, one by one in background tabs?\nEasy Apply jobs go first, company sites after. Jobs that need you wait in “Waiting for you” while it goes on.")) return;
+  const sources = ticked();
+  if (!sources.length) return alert("Tick at least one platform.");
+  if (!confirm(`Apply to all approved jobs on: ${sources.join(", ")}?\nOne by one in background tabs, Easy Apply first. Jobs that need you wait in “Waiting for you” while it goes on.`)) return;
   try {
-    const res = await fetch("/api/autoapply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max: 0 }) });
+    const res = await fetch("/api/autoapply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max: 0, sources }) });
     const start = await res.json();
     if (!res.ok) throw new Error(start.detail || "Couldn't start");
     await toExtension({ type: "jf-autoapply-start", start });
@@ -137,5 +170,6 @@ $("start").onclick = async () => {
   refresh();
 };
 
+loadPlatforms();
 refresh();
 setInterval(refresh, 2000);

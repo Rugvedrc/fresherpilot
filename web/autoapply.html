@@ -31,6 +31,9 @@
       .aa .empty { color: var(--text-2); padding: 6px 0; }
       .aa #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
                    padding: 8px 14px; border-radius: 8px; display: none; max-width: calc(100% - 32px); }
+      .aa .plat { display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--line-strong); border-radius: 8px;
+                  padding: 5px 10px; cursor: pointer; }
+      .aa .plat input { margin: 0; }
       .aa .logwrap { max-height: 520px; overflow: auto; }
     </style>
   </head>
@@ -42,8 +45,9 @@
       </header>
 
       <section class="panel">
+        <div id="platforms" class="row" style="margin-bottom:10px"><span class="small muted">Loading platforms…</span></div>
         <div class="row" id="controls">
-          <button class="btn primary" id="start">▶ Start: apply to all approved jobs</button>
+          <button class="btn primary" id="start">▶ Start on the ticked platforms</button>
           <button class="btn" id="pause">⏸ Pause</button>
           <button class="btn" id="resume">▶ Resume</button>
           <button class="btn" id="stop">⏹ Stop</button>

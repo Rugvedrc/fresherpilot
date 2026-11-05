@@ -173,13 +173,31 @@ def _easy_first(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(jobs, key=key)  # stable: keeps newest first inside each group
 
 
-def start(uids: list[str] | None, max_jobs: int = 0) -> dict[str, Any]:
+def preview() -> dict[str, Any]:
+    """Jobs Auto-apply would do, per platform (for the platform checkboxes on the Auto-apply page)."""
+    from fresherpilot.outreach.telegram_bot import apply_mode
+
+    per: dict[str, dict[str, int]] = {}
+    for j in eligible_jobs(include_with_instructions=True):
+        c = per.setdefault(str(j.get("source") or "Other"), {"total": 0, "easy": 0})
+        c["total"] += 1
+        c["easy"] += apply_mode(j) == "easy"
+    order = list(_EASY_ORDER) + ["Careers", "Telegram"]
+    return {"platforms": [{"source": k, **v} for k, v in sorted(per.items(), key=lambda kv: (order.index(kv[0]) if kv[0] in order else 99, kv[0]))]}
+
+
+def start(uids: list[str] | None, max_jobs: int = 0, sources: list[str] | None = None) -> dict[str, Any]:
     with _lock:
         if STATE["running"]:
             raise RuntimeError("Auto-apply is already running")
     single = bool(uids)
     done_email = emailed_only()
     jobs = eligible_jobs(include_with_instructions=True)
+    if sources and not uids:  # only the platforms ticked on the Auto-apply page
+        wanted_src = set(sources)
+        jobs = [j for j in jobs if str(j.get("source") or "Other") in wanted_src]
+        if not jobs:
+            raise RuntimeError("No approved jobs left on the platforms you picked.")
     if uids:
         wanted = set(uids)
         jobs = [j for j in jobs if j["uid"] in wanted]
