@@ -169,6 +169,12 @@ def seed_sql() -> str:
     return "\n".join(lines) + "\n"
 
 
+BOT_COMMANDS = [("jobs", "Newest jobs you haven't marked"), ("easy", "Easy Apply jobs (for the phone)"),
+                ("site", "Company-site jobs (for the laptop)"), ("status", "Pipeline status: sources, stages, alerts"),
+                ("laptopoff", "Hand everything to the cloud now"), ("stop", "Pause alerts"),
+                ("resume", "Turn alerts back on"), ("help", "All commands")]
+
+
 def env_set(name: str, value: str) -> None:
     env = ROOT / ".env"
     text = env.read_text(encoding="utf-8") if env.exists() else ""
@@ -236,6 +242,16 @@ def main_() -> None:
     print("6/6 Telling the laptop app about the cloud (.env)")
     env_set("FP_CLOUD_URL", url)
     env_set("FP_CLOUD_SECRET", secret)
+    # The bot's command menu (next to the message box): same commands as HELP_TEXT in src/index.js
+    try:
+        import requests
+
+        token = users.key("TELEGRAM_BOT_TOKEN")
+        if token:
+            requests.post(f"https://api.telegram.org/bot{token}/setMyCommands", timeout=20, json={"commands": [
+                {"command": c, "description": t} for c, t in BOT_COMMANDS]})
+    except Exception:  # noqa: BLE001 — the menu is a convenience
+        pass
     # No heartbeat here any more: a plain heartbeat means "an always-on laptop is reading" and paused the cloud's
     # readers for 15 min after every deploy (Nov 5). Only an always-on laptop app (cfg.LIVE_AUTO) sends one.
     print(f"\nDone. FresherPilot Cloud: {url}\nDashboard: {url}/app (set its password once: "

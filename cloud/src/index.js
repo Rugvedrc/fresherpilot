@@ -943,9 +943,33 @@ async function onTelegram(env, update) {
       (st.oldest_waiting_min !== null ? ` (oldest ${ago(st.oldest_waiting_min)})` : "") +
       (st.stuck_ai ? ` · ⚠️ ${st.stuck_ai} failed 3 times` : "") + "\n" +
       `🔔 Alerts: ${st.alerts_24h} in 24 h, last ${ago(st.last_alert_min)}${p.alerts_paused ? " · ⚠️ PAUSED (send /resume)" : ""}`);
-  } else await say("Commands: /jobs (newest unmarked jobs), /easy (Easy Apply ones, for the phone), /site (company-site ones, " +
-                   "for the laptop), /status, /stop (pause alerts), /resume.");
+  } else if (text.startsWith("/laptopoff") || text.startsWith("/cloud")) {
+    // Hand everything to the cloud now: forget any laptop heartbeat (an always-on laptop pauses the cloud's
+    // readers for 15 min) and start the GitHub reader (LinkedIn + Indeed) at once instead of within 10 min.
+    await setState(env, "laptop_seen", 0);
+    await setState(env, "gh_dispatch", 0);
+    let reader = "GitHub reader (LinkedIn + Indeed): not set up";
+    if (env.GH_TOKEN && READER_REPO) {
+      try { await dispatchReader(env, b); reader = "GitHub reader (LinkedIn + Indeed): started"; }
+      catch (e) { reader = `GitHub reader: couldn't start (${esc(String(e).slice(0, 80))})`; }
+    }
+    await say("☁️ <b>The cloud is in charge.</b> Your laptop can be off.\n" +
+              "• Telegram, Naukri, Internshala, Wellfound and career pages: read from the next minute\n" +
+              `• ${reader}\n• AI check and alerts: every minute\n\nSend /status in 2-3 minutes to see every source reading.`);
+  } else await say(HELP_TEXT);  // /help and anything unknown
 }
+
+const HELP_TEXT = "🤖 <b>FresherPilot commands</b>\n\n" +
+  "/jobs - newest jobs you haven't marked yet\n" +
+  "/easy - 📱 Easy Apply ones (apply on the phone)\n" +
+  "/site - 💻 company-site ones (apply on the laptop)\n" +
+  "/status - pipeline now: each source's last read, jobs per stage, alerts\n" +
+  "/laptopoff - hand everything to the cloud right now (it reads 24/7 anyway)\n" +
+  "/stop - pause alerts\n" +
+  "/resume - turn alerts back on\n" +
+  "/help - this list\n\n" +
+  "New matching jobs arrive here on their own; the buttons under each one mark it Applied / Seen / Not for me.";
+
 
 // ---------------------------------------------------------------- the minute tick
 

@@ -63,8 +63,61 @@ def eligible_jobs(include_with_instructions: bool = False) -> list[dict[str, Any
             continue
         job["uid"] = uid
         job["employer"] = contacts.resolve_company(job)
+        job["apply_instructions"] = verdict.get("apply_instructions")
         out.append(job)
     return _easy_first(_newest_first(out))
+
+
+# ---------------------------------------------------------------- special "how to apply" instructions
+
+_FORM = re.compile(r"docs\.google\.com/forms|forms\.gle/|forms\.office\.com|typeform\.com|jotform\.com|zfrmz\.|forms\.zohopublic", re.I)
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _instruction_plan(job: dict[str, Any]) -> tuple[str, Any]:
+    """How to apply to a job with special instructions:
+    ("email", (addresses, subject))  the post asks to email the CV: the app sends it from your Gmail;
+    ("form", url)                    a Google / MS / Typeform form: the extension fills it, you submit;
+    ("manual", summary)              anything else (assessment, walk-in, WhatsApp...): left to you;
+    ("normal", None)                 no special instructions: the usual apply flow."""
+    ins = job.get("apply_instructions") or {}
+    if not ins:
+        return "normal", None
+    text = f"{job.get('description') or ''}\n{ins.get('summary') or ''}"
+    # Only addresses that are really in the post (never one the AI made up), real inboxes only
+    from fresherpilot.outreach import messages
+
+    emails = [e.strip().lower() for e in ins.get("emails") or [] if e and e.strip().lower() in text.lower()
+              and messages._email_ok(e.strip().lower())]
+    forms = [u for u in ins.get("links") or [] if _FORM.search(u or "")]
+    if emails:
+        return "email", (emails[:2], (ins.get("subject_line") or "").strip())
+    if forms:
+        url = forms[0] if forms[0].startswith("http") else f"https://{forms[0]}"
+        return "form", url
+    return "manual", ins.get("summary") or "special instructions"
+
+
+def _send_application_emails(jobs: list[tuple[dict[str, Any], list[str], str]], finish: bool = False) -> None:
+    """Email applications (the post said "send your CV to ..."): one tailored email per job, resume attached,
+    sent from the user's Gmail with the outreach safety checks (placeholder filter, mailbox check, daily cap)."""
+    from fresherpilot.apply import applicant
+    from fresherpilot.outreach import messages
+
+    for job, emails, subject in jobs:
+        try:
+            draft = applicant.application_email(job, subject)
+            results = messages.send_emails(job, job["uid"], [{"to": e, "name": ""} for e in emails],
+                                           draft["subject"], draft["body"], attach_resume=True)
+            sent = [r for r in results if r.get("ok")]
+            if sent:
+                report("applied", job["uid"], f"emailed {', '.join(r['to'] for r in sent)} (subject: {draft['subject'][:60]})")
+            else:
+                report("failed", job["uid"], "email not sent: " + "; ".join(str(r.get("error"))[:80] for r in results))
+        except Exception as exc:  # noqa: BLE001 — one job's problem never stops the rest
+            report("failed", job["uid"], f"email not sent: {str(exc)[:150]}")
+    if finish:  # nothing ran in the browser: this run ends here
+        report("finished", None)
 
 
 # Easy Apply jobs go first (short in-site forms: LinkedIn Easy Apply, Naukri's own apply, Indeed Apply...), in this
@@ -88,20 +141,44 @@ def start(uids: list[str] | None, max_jobs: int = 25) -> dict[str, Any]:
         if STATE["running"]:
             raise RuntimeError("Auto-apply is already running")
     single = bool(uids)
-    jobs = eligible_jobs(include_with_instructions=single)
+    jobs = eligible_jobs(include_with_instructions=True)
     if uids:
         wanted = set(uids)
         jobs = [j for j in jobs if j["uid"] in wanted]
         if not jobs:
             raise RuntimeError("That job isn't eligible (already applied, or not approved).")
     jobs = jobs[: max(1, min(max_jobs, 50))]
-    queue = [{"uid": j["uid"], "url": j["url"], "title": j["title"], "company": j.get("employer") or j.get("company"),
-              "source": j.get("source")} for j in jobs]
+    queue, browser, emails, manual = [], [], [], []
+    for j in jobs:
+        item = {"uid": j["uid"], "url": j["url"], "title": j["title"], "company": j.get("employer") or j.get("company"),
+                "source": j.get("source")}
+        kind, info = _instruction_plan(j)
+        if kind == "email":
+            item["kind"] = "email"
+            emails.append((j, info[0], info[1]))
+        elif kind == "form":  # fill the form the post points to; the user checks it and submits
+            item.update(kind="form", url=info, review=True)
+            browser.append(item)
+        elif kind == "manual" and not single:
+            item["kind"] = "manual"
+            manual.append((item, info))
+        else:  # no instructions, or one job the user asked for: the usual flow on the job page
+            browser.append(item)
+        queue.append(item)
     with _lock:
         STATE.update(running=True, mode="single" if single else "bulk", queue=queue, total=len(queue), index=0,
                      applied=0, skipped=0, failed=0, current=None, waiting=None, command=None)
-    _log("start", None, f"{len(queue)} job(s) queued ({'this job' if single else 'Easy Apply first, then newest'})")
-    return {"queue": queue, "settings": SETTINGS, "mode": STATE["mode"]}
+    _log("start", None, f"{len(queue)} job(s) queued ({'this job' if single else 'Easy Apply first, then newest'}): "
+                        f"{len(browser)} in the browser, {len(emails)} by email, {len(manual)} need you")
+    for item, summary in manual:
+        report("skipped", item["uid"], f"needs you: {summary[:140]}")
+    if emails:
+        from fresherpilot.core import users
+
+        users.thread(_send_application_emails, emails, not browser)  # runs as this user (keys, Gmail, profile)
+    elif not browser:
+        report("finished", None)
+    return {"queue": browser, "settings": SETTINGS, "mode": STATE["mode"]}
 
 
 def _log(event: str, job: dict[str, Any] | None, detail: str = "") -> None:

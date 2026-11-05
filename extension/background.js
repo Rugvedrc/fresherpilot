@@ -195,6 +195,8 @@ async function waitForUser(tabId, job, reason, kind) {
       const a = window.__jfAgent;
       if (!a) return false;
       if (k === "answers") return a.emptyRequired().length === 0;
+      // review: only when the form itself says it was sent (the user submitted it)
+      if (k === "review") return /your response has been recorded|response (was |has been )?(recorded|submitted)|thanks for (submitting|filling)|form (was )?submitted/i.test(document.body?.innerText || "");
       return a.blockedState() === "";
     }, [kind]).catch(() => false);
     okStreak = resolved ? okStreak + 1 : 0;
@@ -291,6 +293,13 @@ async function applyJob(job, settings, mode) {
       }
       // click
       const target = (snapshot.items || []).find((it) => it.key === decision.key);
+      // A form from the job post's own instructions (Google Form...): filled, but YOU check it and submit.
+      if (job.review && decision.is_submit) {
+        const cmd = await waitForUser(tabId, job, "Form filled: check the answers and press Submit yourself", "review");
+        if (cmd === "stop") return { event: "skipped", detail: "stopped by you", stop: true };
+        if (cmd === "skip") return { event: "skipped", detail: "form not submitted (skipped by you)" };
+        return { event: "applied", detail: "form filled; submitted by you" };
+      }
       await status(tabId, `Pressing “${(target?.text || target?.label || decision.key).slice(0, 40)}”…`);
       await sleep(rand(decision.is_submit ? settings.before_submit : settings.step_delay));
       const before = new Set((await chrome.tabs.query({})).map((t) => t.id));

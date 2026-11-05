@@ -223,7 +223,9 @@ function instructionsHtml(job) {
       <p>${escapeHtml(ins.summary || "")}</p>
       ${ins.subject_line ? `<p class="small">Required subject: <code>${escapeHtml(ins.subject_line)}</code> ${copyBtn(ins.subject_line)}</p>` : ""}
       ${links || emails ? `<ul class="contact-list">${links}${emails}</ul>` : ""}
-      <p class="small muted">Easy Apply alone may not be enough. Check the description below for details.</p>
+      <p class="small muted">Easy Apply alone may not be enough. Auto-apply handles this: it emails your resume from your Gmail
+      (with the required subject) when the post gives an address, or fills the form and waits for you to submit it. Other steps
+      (tests, walk-ins) are yours. Check the description below for details.</p>
     </div>`;
 }
 

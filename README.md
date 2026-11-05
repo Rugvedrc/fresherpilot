@@ -57,7 +57,10 @@ no "new job" notifications, so frequent checking is as close to real time as it 
   verdicts), a *Fetch new jobs* button, apply kit, recruiter contacts and outreach.
 - **Browser extension (MV3)**: autofills application forms. Written answers use the job description's
   keywords that your resume supports (and never claim the ones it doesn't), in plain ATS-friendly text.
-  Supervised auto-apply is optional.
+  Supervised auto-apply is optional: *Auto-apply all* does Easy Apply jobs first; when a post says "email your CV
+  to ... with subject ..." it sends that email from your Gmail (resume attached, a message written from the job
+  description, only to an address that is really in the post); when it points to a Google Form, it fills the form
+  and waits for you to submit it.
 - **Outreach**: templated email (Gmail) and WhatsApp messages; placeholder and scraped example addresses
   are skipped, and each mailbox is checked before sending to avoid bounces.
 
@@ -113,9 +116,9 @@ The cloud then starts the reader every 10 minutes; each run loops for almost 6 h
 
 ## Daily use
 
-1. **Telegram** brings new matching jobs on its own. `/easy` lists the newest unmarked Easy Apply jobs (do them on
-   the phone), `/site` the company-site ones (laptop), `/jobs` all of them, `/status` the pipeline, `/stop` and
-   `/resume` pause alerts.
+1. **Telegram** brings new matching jobs on its own. `/help` lists the commands: `/easy` (newest unmarked Easy Apply
+   jobs, do them on the phone), `/site` (company-site ones, for the laptop), `/jobs` (all of them), `/status` (the
+   pipeline), `/laptopoff` (hand everything to the cloud right now), `/stop` and `/resume` (pause alerts).
 2. **Apply**: open the job and press **Alt+Shift+F** to autofill; review and submit.
 3. **Open the local app** when you want the full list, the apply kit, contacts and outreach; it pulls in
    everything the cloud found. *Fetch new jobs* reads every board once more right away.

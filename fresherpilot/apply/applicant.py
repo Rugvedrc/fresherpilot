@@ -396,6 +396,53 @@ def compact_profile(profile: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+EMAIL_SCHEMA = {"type": "object", "properties": {"subject": {"type": "string"}, "body": {"type": "string"}},
+                "required": ["subject", "body"], "additionalProperties": False}
+
+EMAIL_RULES = """You write a job application email for the candidate. Their resume is attached to the email.
+Use ONLY facts from the PROFILE and RESUME; never invent experience, numbers or skills, and never claim anything
+listed under "JD KEYWORDS NOT IN THE RESUME". Use the job's own words for skills the resume really has.
+Body: plain text (no markdown, bullets or emojis), 110-170 words: greeting ("Dear Hiring Team," unless a name is
+given), one line on the role and company, 2-3 sentences matching the job's main requirements to concrete resume
+evidence (projects, tools), one line saying the resume is attached and they're available to join, sign-off with the
+candidate's full name, phone, email and LinkedIn/GitHub if present. No clichés. Subject: if a REQUIRED SUBJECT is
+given, return it exactly; otherwise "Application for <role> - <full name>"."""
+
+
+def application_email(job: dict[str, Any], required_subject: str = "") -> dict[str, str]:
+    """Subject + body for applying by email (the post said "send your CV to ..."). One AI call (~2k tokens)."""
+    from fresherpilot.jobs import llm_filter
+
+    profile = load_profile()
+    me = profile.get("personal", {})
+    name = " ".join(x for x in [me.get("first_name"), me.get("last_name")] if x) or me.get("full_name", "")
+    jd = f"{job.get('title', '')} at {job.get('employer') or job.get('company', '')}\n{(job.get('description') or '')[:5000]}"
+    have, lacking = _jd_keywords(jd)
+    user = (f"PROFILE:\n{compact_profile(profile)}\n\nRESUME:\n{_resume_body()}\n\nJOB:\n{jd}\n\n"
+            f"JD KEYWORDS THE RESUME SUPPORTS: {', '.join(have) or '-'}\nJD KEYWORDS NOT IN THE RESUME: {', '.join(lacking) or '-'}\n"
+            f"REQUIRED SUBJECT: {required_subject or '(none)'}")
+    try:
+        content, _model = llm_filter._create(llm_filter._client(), [{"role": "system", "content": EMAIL_RULES},
+                                                                   {"role": "user", "content": user}],
+                                             schema=EMAIL_SCHEMA, name="application_email", effort="medium")
+        data = json.loads(content)
+        subject, body = str(data.get("subject") or "").strip(), str(data.get("body") or "").strip()
+    except Exception:  # noqa: BLE001 — AI unavailable: a plain, safe template
+        subject, body = "", ""
+    if required_subject:
+        subject = required_subject  # exactly as the post asks
+    if not subject:
+        subject = f"Application for {job.get('title', 'the role')} - {name}".strip(" -")
+    if len(body) < 80:
+        links = profile.get("links", {})
+        body = (f"Dear Hiring Team,\n\nI would like to apply for the {job.get('title', '')} role at "
+                f"{job.get('employer') or job.get('company', 'your company')}. I am a recent graduate and my resume is attached.\n\n"
+                f"I am available to join immediately and would be glad to discuss how I can contribute.\n\n"
+                f"Regards,\n{name}\n{me.get('phone_country_code', '')} {me.get('phone', '')}\n{me.get('email', '')}\n"
+                f"{links.get('linkedin', '')}").strip()
+    return {"subject": subject.replace("\n", " ")[:180], "body": body}
+
+
 def _resume_body() -> str:
     """Resume without the contact header and school marks (already in the profile)."""
     text = _resume_text()
