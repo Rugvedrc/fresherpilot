@@ -1107,13 +1107,21 @@ class AutoApplyEvent(BaseModel):
     uid: str | None = None
     detail: str = ""
     waiting: dict[str, Any] | None = None
+    run: str | None = None  # the extension's run id (events of an older run are ignored)
 
 
 @app.post("/api/autoapply/event")
 def autoapply_event(body: AutoApplyEvent) -> dict:
     from fresherpilot.apply import autoapply
 
-    return autoapply.report(body.event, body.uid, body.detail, body.waiting)
+    return autoapply.report(body.event, body.uid, body.detail, body.waiting, body.run)
+
+
+@app.post("/api/autoapply/reset")
+def autoapply_reset() -> dict:
+    from fresherpilot.apply import autoapply
+
+    return autoapply.reset()
 
 
 class AutoApplyCommand(BaseModel):
@@ -1132,10 +1140,10 @@ def autoapply_command(body: AutoApplyCommand) -> dict:
 
 
 @app.get("/api/autoapply/command")
-def autoapply_take_command(uid: str | None = None) -> dict:
+def autoapply_take_command(uid: str | None = None, run: str | None = None) -> dict:
     from fresherpilot.apply import autoapply
 
-    return {"command": autoapply.take_command(uid)}
+    return {"command": autoapply.take_command(uid, run)}
 
 
 # ---------------------------------------------------------------- dashboard + outreach

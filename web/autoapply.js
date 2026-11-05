@@ -53,10 +53,23 @@ const ago = (iso) => {
 };
 const time = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
+const LABEL = { applied: "Applied", emailed: "Emailed", email_failed: "Email not sent", skipped: "Skipped", failed: "Failed",
+                parked: "Set aside", waiting: "Needs you", resumed: "Continued", start: "Started", finished: "Finished" };
+
 function render() {
   const s = S;
-  const emailed = s.log.filter((e) => e.event === "emailed").length;
-  $("state").textContent = s.running ? (s.paused ? "⏸ Paused (set-aside jobs are still watched)" : "▶ Running in your browser") : "Not running";
+  const lastStart = s.log.map((e) => e.event).lastIndexOf("start");
+  const emailed = s.log.slice(Math.max(0, lastStart)).filter((e) => e.event === "emailed").length;  // this run
+  const silent = s.running && s.ext_seen_s !== null && s.ext_seen_s > 25;  // the extension stopped checking in
+  $("state").textContent = !s.running ? "Not running" : silent ? "⚠️ The extension isn't answering"
+    : s.paused ? "⏸ Paused (set-aside jobs are still watched)" : "▶ Running in your browser";
+  $("alert").hidden = !silent;
+  if (silent) {
+    $("alert").innerHTML = `<b>⚠️ The extension hasn't checked in for ${s.ext_seen_s} s.</b>
+      <div class="why">Chrome may have stopped it, or it was reloaded / the browser closed. Press Reset, reload the extension in
+      chrome://extensions if needed, then start again (jobs already done are left out).</div>
+      <div class="row" style="margin-top:8px"><button class="btn primary" type="button" id="resetBtn">Reset</button></div>`;
+  }
   $("start").hidden = s.running;
   $("chooser").hidden = s.running;
   if (render.wasRunning && !s.running) loadPlatforms();  // counts change after a run
@@ -79,18 +92,19 @@ function render() {
     const secs = s.current_at ? (Date.now() - Date.parse(s.current_at)) / 1000 : 0;
     $("current").className = "";
     $("current").innerHTML = `<div class="job"><div class="who"><b>${esc(c.title)}</b> · ${esc(c.company || "")} <span class="small muted">(${esc(c.source || "")})</span>
-      <div class="why">${s.current_at ? `On it for ${ago(s.current_at)}` : ""}${secs > 240 ? ' <span class="warn">· slow page: it is set aside automatically at 6 min</span>' : ""}
+      <div class="why">${s.current_at ? `On it for ${ago(s.current_at)}` : ""}${secs > 300 ? ' <span class="warn">· slow: it is set aside automatically at 8 min</span>' : ""}
       ${last ? ` · last: ${esc(last.event)} ${esc((last.detail || "").slice(0, 120))}` : ""}${s.waiting ? ` · ✋ ${esc(s.waiting.reason || "")}` : ""}</div></div>
       <div class="row"><button class="btn" data-a="applied">✅ I applied it myself</button><button class="btn" data-a="skip">⏭ Skip this job</button>
       ${c.url ? `<a class="btn" href="${esc(c.url)}" target="_blank" rel="noopener">Open job ↗</a>` : ""}</div></div>`;
   } else {
     $("current").className = "empty";
-    $("current").textContent = s.running ? "Between jobs…" : "Nothing running.";
+    $("current").textContent = s.running ? "Short pause before the next job (20–40 s, so it looks human)…" : "Nothing running.";
   }
 
   const parked = s.parked || [];
   $("parked").className = parked.length ? "" : "empty";
-  $("parked").innerHTML = parked.length ? parked.map((p) => `<div class="job" data-uid="${esc(p.uid)}"><div class="who"><b>${esc(p.title || p.uid)}</b> · ${esc(p.company || "")}
+  $("parked").innerHTML = parked.length ? parked.map((p) => `<div class="job" data-uid="${esc(p.uid)}"><div class="who"><b>${esc(p.title || p.uid)}</b>${p.company ? ` · ${esc(p.company)}` : ""}
+      ${p.url ? `<a class="mini" href="${esc(p.url)}" target="_blank" rel="noopener">job post ↗</a>` : ""}
       <div class="why">${esc(p.reason || "")} · waiting ${ago(p.at)} (skipped after 45 min)</div></div>
       <div class="row"><button class="btn" data-p="open">Open tab</button><button class="btn primary" data-p="applied">✅ I applied</button>
       <button class="btn" data-p="continue">▶ Done, let the bot continue</button><button class="btn" data-p="skip">⏭ Skip</button></div></div>`).join("")
@@ -101,7 +115,7 @@ function render() {
   $("next").innerHTML = nxt.length ? nxt.map((j, i) => `<div class="small">${i + 1}. ${esc(j.title)} · ${esc(j.company || "")} <span class="muted">(${esc(j.source || "")}${j.kind ? `, ${esc(j.kind)}` : ""})</span></div>`).join("") : "—";
 
   const rows = [...s.log].reverse().filter((e) => e.event !== "job_start" && (!filter || e.event === filter || (filter === "parked" && e.event === "waiting")));
-  $("log").innerHTML = rows.length ? rows.map((e) => `<tr><td class="t">${time(e.at)}</td><td>${ICON[e.event] || ""} ${esc(e.event)}</td>
+  $("log").innerHTML = rows.length ? rows.map((e) => `<tr><td class="t">${time(e.at)}</td><td>${ICON[e.event] || ""} ${esc(LABEL[e.event] || e.event)}</td>
       <td><b>${esc(e.title || "")}</b>${e.company ? ` · ${esc(e.company)}` : ""}<div class="why">${esc(e.detail || "")}</div></td></tr>`).join("")
     : `<tr><td class="empty">Nothing yet.</td></tr>`;
 }
@@ -230,11 +244,22 @@ $("start").onclick = async () => {
     const res = await fetch("/api/autoapply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max: 0, pick }) });
     const start = await res.json();
     if (!res.ok) throw new Error(start.detail || "Couldn't start");
-    await toExtension({ type: "jf-autoapply-start", start });
+    const ext = await toExtension({ type: "jf-autoapply-start", start });
+    if (ext && ext.ok === false) {
+      await fetch("/api/autoapply/reset", { method: "POST" });
+      throw new Error(ext.error || "The extension didn't start the run.");
+    }
     toast("Started ▶");
   } catch (err) { alert(err.message); }
   refresh();
 };
+
+document.addEventListener("click", async (e) => {
+  if (e.target.id !== "resetBtn") return;
+  await fetch("/api/autoapply/reset", { method: "POST" });
+  toast("Reset. You can start again.");
+  refresh();
+});
 
 loadChooser();
 refresh();

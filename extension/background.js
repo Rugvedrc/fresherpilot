@@ -135,8 +135,12 @@ async function waitForLoad(tabId, timeout = 15000) {
   return chrome.tabs.get(tabId);
 }
 
+// Every report carries the run's id: the app ignores reports of an older run (one still going in this browser after
+// the app restarted) and tells such a run to stop when it checks in (pollControl).
+let RUN_ID = null;
 const report = (event, uid, detail = "", waiting = null) =>
-  api("/api/autoapply/event", { method: "POST", body: JSON.stringify({ event, uid, detail, waiting }) }).catch(() => null);
+  api("/api/autoapply/event", { method: "POST", body: JSON.stringify({ event, uid, detail, waiting, run: RUN_ID }) }).catch(() => null);
+const cmdUrl = (uid) => `/api/autoapply/command?run=${encodeURIComponent(RUN_ID || "")}${uid ? `&uid=${encodeURIComponent(uid)}` : ""}`;
 
 // Pause until the user clicks Continue / Skip / Stop in the app.
 const status = (tabId, text, waiting = false) =>
@@ -159,7 +163,7 @@ const scrolledPages = new Set(); // tabId|url already scrolled through once
 async function ready(tabId) {
   await waitForLoad(tabId);
   await inject(tabId);
-  const r = await inTab(tabId, () => window.__jfAgent.waitReady(15000));
+  const r = await inTab(tabId, () => window.__jfAgent.waitReady(8000));  // LinkedIn & co. never go fully quiet
   // First visit to a page: scroll through it once so lazy-loaded buttons exist.
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   const key = `${tabId}|${(tab?.url || "").split("#")[0]}`;
@@ -183,7 +187,7 @@ async function waitForUser(tabId, job, reason, kind) {
   let okStreak = 0;
   for (let i = 0; i < 900; i++) { // up to ~30 minutes
     await sleep(2000);
-    const { command } = await api("/api/autoapply/command").catch(() => ({ command: null }));
+    const { command } = await api(cmdUrl()).catch(() => ({ command: null }));
     if (command) {
       if (command === "continue") await report("resumed", job.uid);
       return command;
@@ -223,7 +227,7 @@ async function needsYou(tabId, job, reason, kind, mode) {
 // and the run goes on. You can also end the current job any time from the Auto-apply page (Skip / I applied it /
 // Stop): the poller below cancels it within ~2 s. A cancelled attempt stops at its next step and never touches its
 // tab again (each attempt has its own token).
-const JOB_MAX_MS = 6 * 60 * 1000;
+const JOB_MAX_MS = 8 * 60 * 1000;  // a long Easy Apply form (7-8 steps) fits; a stuck page doesn't hold the run
 const cancelled = new WeakSet();
 const ctl = { current: null, stop: false, paused: false };  // current = { uid, token, end(result) }
 
@@ -420,7 +424,7 @@ async function parkedResolved(tabId, kind) {
 // run commands (stop / pause / resume / skip = skip the current job / applied = you applied the current job) and
 // per set-aside job (open / continue / skip / applied).
 async function pollControl(parked) {
-  const { command } = await api("/api/autoapply/command").catch(() => ({ command: null }));
+  const { command } = await api(cmdUrl()).catch(() => ({ command: null }));
   if (command === "stop") {
     ctl.stop = true;
     ctl.current?.end({ byYou: true, event: "skipped", detail: "run stopped by you" });
@@ -429,7 +433,7 @@ async function pollControl(parked) {
   else if (command === "skip" && ctl.current) ctl.current.end({ byYou: true, event: "skipped", detail: "skipped by you", reported: true });
   else if (command === "applied" && ctl.current) ctl.current.end({ byYou: true, event: "applied", detail: "applied by you", reported: true });
   for (const [uid, p] of [...parked]) {
-    const r = await api(`/api/autoapply/command?uid=${encodeURIComponent(uid)}`).catch(() => ({ command: null }));
+    const r = await api(cmdUrl(uid)).catch(() => ({ command: null }));
     if (!r.command) continue;
     if (r.command === "open") {
       const tab = await chrome.tabs.get(p.tabId).catch(() => null);
@@ -483,8 +487,15 @@ async function finish(parked, job, result) {
 }
 
 async function runQueue(start) {
-  if (running) return { ok: false, error: "Auto-apply is already running" };
+  if (running) {
+    // A new Start replaces the run still going here (e.g. from before the app restarted): end it, then start.
+    ctl.stop = true;
+    ctl.current?.end({ byYou: true, event: "skipped", detail: "replaced by a new run", reported: true });
+    for (let i = 0; i < 100 && running; i++) await sleep(200);
+    if (running) return { ok: false, error: "The previous auto-apply run didn't stop. Reload the extension and try again." };
+  }
   running = true;
+  RUN_ID = start.run_id || null;
   ctl.stop = false;
   ctl.paused = false;
   // Chrome stops idle extension workers after ~30 s; a cheap API call every 20 s keeps this run alive.
@@ -516,11 +527,14 @@ async function runQueue(start) {
         await finish(parked, job, result);
         if (result.stop) ctl.stop = true;
         if (mode === "single") {
-          const { command } = await api("/api/autoapply/command").catch(() => ({ command: null }));
+          const { command } = await api(cmdUrl()).catch(() => ({ command: null }));
           if (command === "stop") ctl.stop = true;
         }
         if (parked.size && !ctl.stop) await serviceParked(parked, settings, mode);  // anything you finished meanwhile
-        if (!ctl.stop && i < queue.length - 1) await sleep(rand(settings.between_jobs));
+        if (!ctl.stop && i < queue.length - 1) {  // a human-like pause, cut short by Stop
+          const until = Date.now() + rand(settings.between_jobs);
+          while (!ctl.stop && Date.now() < until) await sleep(500);
+        }
       }
       // Queue done: now only the set-aside jobs are left. Keep checking them until each is done or skipped.
       while (parked.size && !ctl.stop) {

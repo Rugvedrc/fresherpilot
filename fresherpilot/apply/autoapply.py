@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,7 @@ STATE: dict[str, Any] = {
     # Jobs set aside because they need you (sign in, CAPTCHA, a question, a form to submit): the run goes on with
     # the next job and comes back to these when you've done it or press Continue on one. uid -> info / command.
     "parked": {}, "job_commands": {}, "final": [], "paused": False, "current_at": None,
+    "run_id": None, "ext_seen": 0.0, "titles": {},
 }
 _lock = threading.Lock()
 
@@ -382,7 +385,8 @@ def start(uids: list[str] | None, max_jobs: int = 0, sources: list[str] | None =
     with _lock:
         STATE.update(running=True, mode="single" if single else "bulk", queue=queue, total=len(queue), index=0,
                      applied=0, skipped=0, failed=0, current=None, waiting=None, command=None, parked={}, job_commands={},
-                     final=[], paused=False, current_at=None)
+                     final=[], paused=False, current_at=None, run_id=uuid.uuid4().hex[:12], ext_seen=time.time())
+        STATE["titles"].update({q["uid"]: {"title": q.get("title"), "company": q.get("company")} for q in queue})
     _log("start", None, f"{len(queue)} job(s) queued ({'this job' if single else 'Easy Apply first, then newest'}): "
                         f"{len(browser)} in the browser, {len(emails)} by email, {len(manual)} need you")
     for item, summary in manual:
@@ -393,22 +397,33 @@ def start(uids: list[str] | None, max_jobs: int = 0, sources: list[str] | None =
         users.thread(_send_application_emails, emails, False)  # the browser queue always has these jobs too  # runs as this user (keys, Gmail, profile)
     elif not browser:
         report("finished", None)
-    return {"queue": browser, "settings": SETTINGS, "mode": STATE["mode"]}
+    return {"queue": browser, "settings": SETTINGS, "mode": STATE["mode"], "run_id": STATE["run_id"]}
 
 
-def _log(event: str, job: dict[str, Any] | None, detail: str = "") -> None:
-    entry = {"at": datetime.now(timezone.utc).isoformat(), "event": event, "detail": detail,
-             "uid": (job or {}).get("uid"), "title": (job or {}).get("title"), "company": (job or {}).get("company")}
+def _log(event: str, job: dict[str, Any] | None, detail: str = "", uid: str | None = None) -> None:
+    uid = (job or {}).get("uid") or uid
+    known = STATE["titles"].get(uid or "", {})
+    entry = {"at": datetime.now(timezone.utc).isoformat(), "event": event, "detail": detail, "uid": uid,
+             "title": (job or {}).get("title") or known.get("title"), "company": (job or {}).get("company") or known.get("company")}
     with _lock:
         STATE["log"] = (STATE["log"] + [entry])[-200:]
     with _log_path().open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Progress from the extension: job_start / applied / skipped / failed / waiting / resumed / finished."""
+def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any] | None = None,
+           run: str | None = None) -> dict[str, Any]:
+    """Progress from the extension: job_start / applied / skipped / failed / waiting / resumed / finished.
+    run = the extension's run id: events of an older run (still going in the browser after the app restarted or a
+    new Start) are ignored, so they never mix with this run's counts."""
     from fresherpilot.apply import applicant
 
+    if run:
+        with _lock:
+            STATE["ext_seen"] = time.time()
+            stale = run != STATE.get("run_id")
+        if stale:
+            return {"stale": True}
     job = next((q for q in STATE["queue"] if q["uid"] == uid), None) if uid else None
     with _lock:
         repeat = event in ("applied", "skipped", "failed") and bool(uid) and uid in STATE["final"]
@@ -431,7 +446,9 @@ def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any
             STATE["waiting"] = None
         elif event == "parked" and uid:
             STATE["parked"][uid] = {**(waiting or {"reason": detail}), "uid": uid,
-                                    "title": (job or {}).get("title"), "company": (job or {}).get("company"),
+                                    "title": (job or {}).get("title") or (waiting or {}).get("title") or STATE["titles"].get(uid, {}).get("title"),
+                                    "company": (job or {}).get("company") or STATE["titles"].get(uid, {}).get("company"),
+                                    "url": (job or {}).get("url"),
                                     "at": datetime.now(timezone.utc).isoformat()}
             STATE["waiting"] = None
         elif event == "finished":
@@ -454,7 +471,7 @@ def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any
         if match:
             visited.mark(match, True)
     if event != "job_start" or detail:
-        _log(event, job, detail)
+        _log(event, job, detail, uid)
     return status()
 
 
@@ -481,8 +498,12 @@ def command(action: str, uid: str | None = None) -> None:
         report("applied" if action == "applied" else "skipped", cur, "applied by you" if action == "applied" else "skipped by you")
 
 
-def take_command(uid: str | None = None) -> str | None:
+def take_command(uid: str | None = None, run: str | None = None) -> str | None:
     with _lock:
+        if run:
+            if run != STATE.get("run_id"):
+                return "stop"  # an old run still going in the browser: end it
+            STATE["ext_seen"] = time.time()
         if uid:
             return STATE["job_commands"].pop(uid, None)
         cmd, STATE["command"] = STATE["command"], None
@@ -492,8 +513,20 @@ def take_command(uid: str | None = None) -> str | None:
 def status() -> dict[str, Any]:
     with _lock:
         nxt = [{k: q.get(k) for k in ("uid", "title", "company", "source", "kind")} for q in STATE["queue"][STATE["index"]:STATE["index"] + 8]]
-        return ({k: v for k, v in STATE.items() if k not in ("log", "queue", "parked", "job_commands", "final")}
-                | {"log": STATE["log"][-200:], "parked": list(STATE["parked"].values()), "next": nxt})
+        seen = STATE.get("ext_seen") or 0
+        return ({k: v for k, v in STATE.items() if k not in ("log", "queue", "parked", "job_commands", "final", "titles", "ext_seen")}
+                | {"log": STATE["log"][-200:], "parked": list(STATE["parked"].values()), "next": nxt,
+                   "ext_seen_s": round(time.time() - seen) if seen else None})
+
+
+def reset() -> dict[str, Any]:
+    """The page's "Reset": the extension stopped answering (reloaded / browser closed). Ends this run in the app;
+    a run still going in the browser is told to stop the next time it checks in."""
+    with _lock:
+        STATE.update(running=False, current=None, waiting=None, command=None, paused=False, current_at=None,
+                     run_id=None, parked={}, job_commands={})
+    _log("finished", None, "reset from the Auto-apply page")
+    return status()
 
 
 # ---------------------------------------------------------------- deciding the next step
@@ -563,6 +596,27 @@ ALREADY_TEXT = re.compile(r"you(?:'ve| have) already applied|already applied (?:
 
 
 def decide(body: dict[str, Any]) -> dict[str, Any]:
+    """Next action for the extension, from a page snapshot. Every step is written to autoapply_steps.jsonl."""
+    began = time.time()
+    out = _decide(body)
+    try:
+        from fresherpilot.core import users
+
+        path = users.path("autoapply_steps.jsonl")
+        if path.exists() and path.stat().st_size > 5_000_000:
+            path.write_text("", encoding="utf-8")
+        snap = body.get("snapshot") or {}
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": datetime.now(timezone.utc).isoformat(), "uid": (body.get("job") or {}).get("uid"),
+                                "url": (snap.get("url") or "")[:200], "action": out.get("action"), "key": out.get("key"),
+                                "reason": (out.get("reason") or "")[:200], "items": len(snap.get("items") or []),
+                                "filled": bool(body.get("filled")), "s": round(time.time() - began, 1)}, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 — logging never breaks a run
+        pass
+    return out
+
+
+def _decide(body: dict[str, Any]) -> dict[str, Any]:
     """Next action for the extension, from a page snapshot."""
     from fresherpilot.jobs import llm_filter
 
