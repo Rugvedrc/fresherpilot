@@ -74,6 +74,9 @@ function boardReject(job) {  // llm_filter._board_reject (stretch jobs off)
   if (words) return words;
   const level = String(job.experience || "");
   if (job.source === "LinkedIn" && /director|executive/i.test(level)) return ["too_senior", "LinkedIn level"];
+  // Never alerted anyway (older than posted_within_days): skip the AI. Nov 5: ~3 of 4 Naukri feed items were
+  // recruiter-refreshed listings 15-30+ days old (109 approved-but-old in a day).
+  if (job.posted_days != null && +job.posted_days > CONFIG.posted_within_days) return ["too_old", `posted ${job.posted_days} days ago`];
   const m = level.match(/^\s*(\d+(?:\.\d+)?)\s*(?:-\s*\d+\s*|\+\s*)years/i);
   if (m && parseFloat(m[1]) >= CONFIG.reject_from_years + (CONFIG.stretch_jobs ? 1 : 0)) return ["needs_experience", level];
   return null;
@@ -1109,7 +1112,7 @@ export default {
       // only up to the oldest job the cloud's AI hasn't checked yet: the laptop gets each job once, with its verdict
       const pend = await env.DB.prepare("SELECT MIN(found_at) AS m FROM jobs WHERE status = 'new' AND tries < 3").first();
       const until = pend && pend.m ? pend.m : now() + 1;
-      const rows = (await env.DB.prepare("SELECT id, source, title, company, location, experience, url, blog_url, posted, posted_days, description, work_type, status, category, reason, fit, facts, found_at, apply_mode FROM jobs WHERE found_at > ? AND found_at < ? ORDER BY found_at LIMIT 300").bind(since, until).all()).results;
+      const rows = (await env.DB.prepare("SELECT id, source, title, company, location, experience, url, blog_url, posted, posted_days, description, work_type, status, category, reason, fit, facts, found_at, apply_mode, within_min FROM jobs WHERE found_at > ? AND found_at < ? ORDER BY found_at LIMIT 300").bind(since, until).all()).results;
       return json({ jobs: rows });
     }
     if (url.pathname === "/api/status") {

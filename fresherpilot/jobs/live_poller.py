@@ -145,7 +145,8 @@ def run_once(start_checker: Callable[[], Any], start_fetch: Callable[[], Any]) -
             s["pending"], s["first_pending"] = 0, None
 
     users.thread(run)
-    start_fetch()  # Naukri on Apify
+    # Naukri isn't read here: the cloud runs it on Apify every ~4 min. A laptop run after downtime looked back days
+    # and mostly bought recruiter-refreshed listings 15-30+ days old (measured Nov 5), and duplicated the cloud's.
     return True
 
 

@@ -365,6 +365,12 @@ def cloud_sync(on_new: Callable[[], Any] | None = None) -> dict[str, int]:
             source, _, jid = str(row["id"]).partition(":")
             job = {k: row.get(k) for k in ("title", "company", "location", "experience", "url", "blog_url", "posted",
                                            "posted_days", "description", "work_type", "apply_mode")} | {"id": jid, "source": source, "skills": []}
+            # when the cloud found it, and the read's "posted in the last N min" window: the list then shows
+            # "< 32 min ago" instead of a date-only "1 day ago" (LinkedIn / Indeed dates are UTC)
+            if row.get("found_at"):
+                job["first_seen"] = datetime.fromtimestamp(int(row["found_at"]) / 1000, timezone.utc).isoformat()
+            if row.get("within_min"):
+                job["posted_within_min"] = int(row["within_min"])
             new.append(job)
             v = _cloud_verdict(job, row)
             if v:

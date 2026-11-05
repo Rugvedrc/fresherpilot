@@ -791,6 +791,16 @@ def _board_reject(job: dict[str, Any]) -> tuple[str, str] | None:
     level = str(job.get("experience") or "")
     if job.get("source") == "LinkedIn" and re.search(r"director|executive", level, re.I):  # mid-senior: AI reads the JD
         return "too_senior", f"LinkedIn level: {level}"
+    # Older than the alert window: never alerted, so skip the AI (Nov 5: ~3 of 4 Naukri feed items were
+    # recruiter-refreshed listings 15-30+ days old). Same limit as the cloud's alerts.
+    from fresherpilot.core import search_config as _cfg
+
+    try:
+        days = int(job.get("posted_days")) if job.get("posted_days") not in (None, "") else None
+    except (TypeError, ValueError):
+        days = None
+    if days is not None and days > _cfg.POSTED_WITHIN_DAYS:
+        return "too_old", f"posted {days} days ago"
     m = re.match(r"\s*(\d+(?:\.\d+)?)\s*(?:-\s*\d+\s*|\+\s*)years", level)
     # One year over the limit ("1-3 years") is a stretch job judged by the AI when stretch jobs are on;
     # otherwise (and for more years) it is rejected free.

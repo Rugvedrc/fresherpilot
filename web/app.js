@@ -20,6 +20,8 @@ const CATEGORY_LABELS = {
   non_developer: "Not a developer role",
   non_software_engineering: "Non-software engineering",
   off_stack: "Different tech stack",
+  too_old: "Posted over 3 days ago",
+  other_city: "Other city",
   other: "Not relevant",
 };
 const ROLE_LABELS = { recruiter: "Recruiter / HR", leader: "Hiring leader", employee: "Works there" };
