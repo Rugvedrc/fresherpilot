@@ -219,7 +219,31 @@ async function needsYou(tabId, job, reason, kind, mode) {
   return { continue: true };
 }
 
-async function applyJob(job, settings, mode, resumeTabId = null) {
+// A job may not hold up "Auto-apply all": after JOB_MAX_MS it's set aside (tab left open, in "Waiting for you")
+// and the run goes on. The abandoned attempt stops at its next step (`cancelled`) and leaves the tab alone.
+const JOB_MAX_MS = 6 * 60 * 1000;
+const cancelled = new WeakSet();  // tokens of attempts that timed out (each attempt has its own)
+async function applyWithLimit(job, settings, mode, resumeTabId = null) {
+  if (mode === "single") return applyJob(job, settings, mode, resumeTabId);
+  const token = {};
+  let timer;
+  const attempt = applyJob(job, settings, mode, resumeTabId, token);
+  const limit = new Promise((res) => { timer = setTimeout(() => res({ timedOut: true }), JOB_MAX_MS); });
+  const result = await Promise.race([attempt, limit]);
+  clearTimeout(timer);
+  if (!result.timedOut) return result;
+  cancelled.add(token);
+  attempt.catch(() => {});
+  const tabs = Object.entries(applyingTab).filter(([, uid]) => uid === job.uid).map(([id]) => +id);
+  const tabId = tabs.pop();
+  if (!tabId || !(await chrome.tabs.get(tabId).catch(() => null))) {
+    return { event: "skipped", detail: `took over ${JOB_MAX_MS / 60000} min and its tab is gone` };
+  }
+  return { event: "parked", kind: "manual", tabId,
+           reason: `Took over ${JOB_MAX_MS / 60000} min (stuck page?): finish it in the tab and press Continue, or Skip` };
+}
+
+async function applyJob(job, settings, mode, resumeTabId = null, token = null) {
   let tabId = resumeTabId;
   if (!tabId) tabId = (await chrome.tabs.create({ url: job.url, active: mode === "single" })).id;
   const opened = [tabId];
@@ -236,6 +260,7 @@ async function applyJob(job, settings, mode, resumeTabId = null) {
     let rescanned = false;
     const history = [];
     for (let step = 0; step < (settings.max_steps || 28); step++) {
+      if (token && cancelled.has(token)) { parked = true; return { event: "skipped", detail: "timed out" }; }  // set aside meanwhile
       const r = await ready(tabId);
       await status(tabId, r && !r.ready ? `Page still busy (${r.reason}); continuing anyway…` : "Reading the page…");
       let snapshot = await takeSnapshot(tabId);
@@ -336,7 +361,7 @@ async function applyJob(job, settings, mode, resumeTabId = null) {
     }
     return { event: "skipped", detail: "too many steps" };
   } finally {
-    if (!parked) {
+    if (!parked && !(token && cancelled.has(token))) {  // a timed-out attempt leaves its tab to the set-aside job
       for (const id of opened) delete applyingTab[id];
       if (mode !== "single") for (const id of opened) chrome.tabs.remove(id).catch(() => {});
     }
@@ -379,7 +404,7 @@ async function serviceParked(parked, settings, mode) {
       await report("resumed", uid, "you finished it: continuing this application");
       let result;
       try {
-        result = await applyJob(p.job, settings, mode, p.tabId);
+        result = await applyWithLimit(p.job, settings, mode, p.tabId);
       } catch (err) {
         result = { event: "failed", detail: String(err.message || err).slice(0, 200) };
       }
@@ -415,7 +440,7 @@ async function runQueue(start) {
         await report("job_start", job.uid);
         let result;
         try {
-          result = await applyJob(job, settings, mode);
+          result = await applyWithLimit(job, settings, mode);
         } catch (err) {
           result = { event: "failed", detail: String(err.message || err).slice(0, 200) };
         }

@@ -409,6 +409,30 @@ candidate's full name, phone, email and LinkedIn/GitHub if present. No clichés.
 given, return it exactly; otherwise "Application for <role> - <full name>"."""
 
 
+# Fill-in-the-blank parts of a subject the post asks for ("Application - Your Name", "[Position] | <Name>"...).
+# Nov 5 2026: two emails went out with "Your Name" in the subject.
+_PH_NAME = re.compile(r"[\[(<{]?\s*(?:your|candidate'?s?|applicant'?s?)\s+(?:full\s+)?name\s*[\])>}]?"
+                      r"|[\[(<{]\s*(?:full\s+)?name\s*[\])>}]", re.I)
+_PH_ROLE = re.compile(r"[\[(<{]\s*(?:the\s+)?(?:role|position|job\s*title|post|job\s*role|designation)(?:\s*name)?"
+                      r"(?:\s*applied\s*for)?\s*[\])>}]|\b(?:position|role)\s+applied\s+for\b", re.I)
+_PH_EXP = re.compile(r"[\[(<{]\s*(?:years?\s+of\s+)?experience(?:\s+in\s+years)?\s*[\])>}]", re.I)
+_PH_LEFT = re.compile(r"\byour\s+name\b|[\[<{]\s*[A-Za-z ]{2,30}\s*[\]>}]", re.I)
+
+
+def fill_placeholders(text: str, name: str, job: dict[str, Any]) -> str:
+    def put(value: str):  # keep the space in front of the blank ("Role – Your Name" → "Role – Rugved ...")
+        return lambda m: (" " if m.group(0)[:1].isspace() else "") + value
+
+    out = _PH_NAME.sub(put(name), text or "")
+    out = _PH_ROLE.sub(put(str(job.get("title") or "the role")), out)
+    out = _PH_EXP.sub(put("Fresher"), out)
+    return re.sub(r"\s{2,}", " ", out).strip()
+
+
+def has_placeholder(text: str) -> bool:
+    return bool(_PH_LEFT.search(text or ""))
+
+
 def application_email(job: dict[str, Any], required_subject: str = "") -> dict[str, str]:
     """Subject + body for applying by email (the post said "send your CV to ..."). One AI call (~2k tokens)."""
     from fresherpilot.jobs import llm_filter
@@ -430,7 +454,7 @@ def application_email(job: dict[str, Any], required_subject: str = "") -> dict[s
     except Exception:  # noqa: BLE001 — AI unavailable: a plain, safe template
         subject, body = "", ""
     if required_subject:
-        subject = required_subject  # exactly as the post asks
+        subject = fill_placeholders(required_subject, name, job)  # as the post asks, with "Your Name" etc. filled in
     if not subject:
         subject = f"Application for {job.get('title', 'the role')} - {name}".strip(" -")
     if len(body) < 80:

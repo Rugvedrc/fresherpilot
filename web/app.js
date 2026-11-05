@@ -918,7 +918,7 @@ $("showUnchecked").addEventListener("change", (e) => {
 // ---------------------------------------------------------------- auto-apply (runs in the extension)
 
 let autoPolling = false;
-const AUTO_ICON = { applied: "✅", skipped: "⏭", failed: "⚠", waiting: "✋", parked: "✋", resumed: "▶", start: "▶", finished: "🏁" };
+const AUTO_ICON = { applied: "✅", skipped: "⏭", failed: "⚠", waiting: "✋", parked: "✋", resumed: "▶", start: "▶", finished: "🏁", emailed: "📧", email_failed: "📧⚠" };
 const hasExtension = () => !!document.documentElement.dataset.jobfinderExtension;
 
 // Talk to the FresherPilot extension through bridge.js (window messages).

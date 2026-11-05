@@ -45,6 +45,28 @@ SETTINGS = {"step_delay": [0.8, 2.0], "before_submit": [1.5, 3.0], "between_jobs
 
 # ---------------------------------------------------------------- queue
 
+def emailed_only() -> set[str]:
+    """Jobs applied to by email but not yet on the job site (from the auto-apply log)."""
+    mailed, site = set(), set()
+    try:
+        lines = _log_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        uid = e.get("uid")
+        if not uid:
+            continue
+        if e.get("event") == "emailed" or (e.get("event") == "applied" and str(e.get("detail") or "").startswith("emailed")):
+            mailed.add(uid)
+        elif e.get("event") in ("applied", "skipped"):  # the job site was tried (applied, or closed / not possible)
+            site.add(uid)
+    return mailed - site
+
+
 def eligible_jobs(include_with_instructions: bool = False) -> list[dict[str, Any]]:
     """AI-approved jobs not applied yet, newest first."""
     from fresherpilot.apply import applicant
@@ -54,13 +76,14 @@ def eligible_jobs(include_with_instructions: bool = False) -> list[dict[str, Any
     from fresherpilot.server import _newest_first, _normalized_jobs
 
     apps = applicant.applications()
+    email_only = emailed_only()
     out = []
     for job in _normalized_jobs(load_cache()):
         if not (job.get("url") or "").startswith("http"):
             continue
         uid = f"{job.get('source')}:{job.get('id')}"
         verdict = llm_filter.cached_verdict(job) or {}
-        if verdict.get("decision") != "keep" or uid in apps:
+        if verdict.get("decision") != "keep" or (uid in apps and uid not in email_only):
             continue
         if verdict.get("apply_instructions") and not include_with_instructions:
             continue
@@ -75,6 +98,12 @@ def eligible_jobs(include_with_instructions: bool = False) -> list[dict[str, Any
 
 _FORM = re.compile(r"docs\.google\.com/forms|forms\.gle/|forms\.office\.com|typeform\.com|jotform\.com|zfrmz\.|forms\.zohopublic", re.I)
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Inboxes that are never for applications (Nov 5 2026: a CV went to reasonableaccommodations@aon.com).
+_NOT_FOR_CVS = re.compile(r"accommodat|accessib|disabilit|privacy|gdpr|dpo|no-?reply|donotreply|do-not-reply|grievance|fraud|"
+                          r"scam|security|abuse|legal|complian|ethic|whistle|press|media|investor|billing|invoice|sales|"
+                          r"support|helpdesk|feedback|unsubscribe|webmaster|postmaster|admin", re.I)
+# ...and the words around the address must say to send something there
+_ASKS_FOR_CV = re.compile(r"resume|\bcv\b|curriculum|apply|application|send|share|mail|email|forward|drop|submit|interested", re.I)
 
 
 def _instruction_plan(job: dict[str, Any]) -> tuple[str, Any]:
@@ -90,8 +119,10 @@ def _instruction_plan(job: dict[str, Any]) -> tuple[str, Any]:
     # Only addresses that are really in the post (never one the AI made up), real inboxes only
     from fresherpilot.outreach import messages
 
-    emails = [e.strip().lower() for e in ins.get("emails") or [] if e and e.strip().lower() in text.lower()
-              and messages._email_ok(e.strip().lower())]
+    low = text.lower()
+    emails = [e.strip().lower() for e in ins.get("emails") or [] if e and e.strip().lower() in low
+              and messages._email_ok(e.strip().lower()) and not _NOT_FOR_CVS.search(e.split("@")[0])
+              and _ASKS_FOR_CV.search(low[max(0, low.find(e.strip().lower()) - 160): low.find(e.strip().lower()) + 80])]
     forms = [u for u in ins.get("links") or [] if _FORM.search(u or "")]
     if emails:
         return "email", (emails[:2], (ins.get("subject_line") or "").strip())
@@ -110,15 +141,18 @@ def _send_application_emails(jobs: list[tuple[dict[str, Any], list[str], str]], 
     for job, emails, subject in jobs:
         try:
             draft = applicant.application_email(job, subject)
+            if applicant.has_placeholder(draft["subject"]) or applicant.has_placeholder(draft["body"][:400]):
+                report("email_failed", job["uid"], f"email not sent: unfilled placeholder in '{draft['subject'][:80]}'")
+                continue
             results = messages.send_emails(job, job["uid"], [{"to": e, "name": ""} for e in emails],
                                            draft["subject"], draft["body"], attach_resume=True)
             sent = [r for r in results if r.get("ok")]
             if sent:
-                report("applied", job["uid"], f"emailed {', '.join(r['to'] for r in sent)} (subject: {draft['subject'][:60]})")
+                report("emailed", job["uid"], f"emailed {', '.join(r['to'] for r in sent)} (subject: {draft['subject'][:60]})")
             else:
-                report("failed", job["uid"], "email not sent: " + "; ".join(str(r.get("error"))[:80] for r in results))
+                report("email_failed", job["uid"], "email not sent: " + "; ".join(str(r.get("error"))[:80] for r in results))
         except Exception as exc:  # noqa: BLE001 — one job's problem never stops the rest
-            report("failed", job["uid"], f"email not sent: {str(exc)[:150]}")
+            report("email_failed", job["uid"], f"email not sent: {str(exc)[:150]}")
     if finish:  # nothing ran in the browser: this run ends here
         report("finished", None)
 
@@ -144,6 +178,7 @@ def start(uids: list[str] | None, max_jobs: int = 0) -> dict[str, Any]:
         if STATE["running"]:
             raise RuntimeError("Auto-apply is already running")
     single = bool(uids)
+    done_email = emailed_only()
     jobs = eligible_jobs(include_with_instructions=True)
     if uids:
         wanted = set(uids)
@@ -157,15 +192,17 @@ def start(uids: list[str] | None, max_jobs: int = 0) -> dict[str, Any]:
         item = {"uid": j["uid"], "url": j["url"], "title": j["title"], "company": j.get("employer") or j.get("company"),
                 "source": j.get("source")}
         kind, info = _instruction_plan(j)
-        if kind == "email":
-            item["kind"] = "email"
-            emails.append((j, info[0], info[1]))
+        if kind == "email":  # apply on the job site AND send the email the post asks for
+            if j["uid"] not in done_email:
+                emails.append((j, info[0], info[1]))
+            item["kind"] = "email+site"
+            browser.append(item)
         elif kind == "form":  # fill the form the post points to; the user checks it and submits
             item.update(kind="form", url=info, review=True)
             browser.append(item)
-        elif kind == "manual" and not single:
-            item["kind"] = "manual"
-            manual.append((item, info))
+        elif kind == "manual":  # e.g. "apply only on the official site": that's the job link; the extension
+            item["note"] = str(info)[:200]  # sets the job aside in "Waiting for you" if it really needs you
+            browser.append(item)
         else:  # no instructions, or one job the user asked for: the usual flow on the job page
             browser.append(item)
         queue.append(item)
@@ -179,7 +216,7 @@ def start(uids: list[str] | None, max_jobs: int = 0) -> dict[str, Any]:
     if emails:
         from fresherpilot.core import users
 
-        users.thread(_send_application_emails, emails, not browser)  # runs as this user (keys, Gmail, profile)
+        users.thread(_send_application_emails, emails, False)  # the browser queue always has these jobs too  # runs as this user (keys, Gmail, profile)
     elif not browser:
         report("finished", None)
     return {"queue": browser, "settings": SETTINGS, "mode": STATE["mode"]}
@@ -221,8 +258,8 @@ def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any
         if event in ("applied", "skipped", "failed") and uid:
             STATE["parked"].pop(uid, None)
             STATE["job_commands"].pop(uid, None)
-    if event == "applied" and uid:
-        applicant.set_application(uid, "applied", note="auto-applied")
+    if event in ("applied", "emailed") and uid:
+        applicant.set_application(uid, "applied", note="auto-applied" if event == "applied" else "emailed")
         from fresherpilot.jobs import visited
         from fresherpilot.jobs.apify_jobs import load_cache
         from fresherpilot.server import _normalized_jobs

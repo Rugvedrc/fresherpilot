@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FresherPilot Autofill",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Fills job application forms from your FresherPilot profile and auto-applies in your own browser, and reads Naukri searches for the app.",
   "permissions": [
     "activeTab",
