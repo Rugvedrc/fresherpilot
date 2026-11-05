@@ -31,4 +31,7 @@ CREATE TABLE IF NOT EXISTS actions (         -- button taps, pulled by the lapto
   n INTEGER PRIMARY KEY AUTOINCREMENT,
   uid TEXT NOT NULL, action TEXT NOT NULL, at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS claims_at ON claims(at);
+CREATE INDEX IF NOT EXISTS alerts_at ON alerts(at);
+CREATE INDEX IF NOT EXISTS actions_at ON actions(at);
 CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT);

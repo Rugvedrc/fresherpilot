@@ -40,6 +40,50 @@ const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").
 const daysAgo = (iso) => { const t = Date.parse(iso || ""); return Number.isFinite(t) ? Math.max(0, Math.floor((now() - t) / DAY)) : null; };
 const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
 
+// ---------------------------------------------------------------- D1 use meter
+// D1 free plan (per day, reset 00:00 UTC): 5M rows read, 100k rows written. Nov 5 2026 the reader's known-ID list
+// read >5M rows and blocked D1 for the rest of the day. Every query now goes through this meter (D1's own
+// meta.rows_read / rows_written); the totals are saved per UTC day in state "d1_use" and shown in /status.
+const D1_READ_LIMIT = 5_000_000, D1_WRITE_LIMIT = 100_000;
+const D1_SOFT = 0.6;  // above 60% of a daily limit: only the essential work runs (no reader known-list, fewer checks)
+const USE = { r: 0, w: 0 };
+const addUse = (m) => { if (m) { USE.r += m.rows_read || 0; USE.w += m.rows_written || 0; } };
+function metered(db) {
+  if (db.__metered) return db;
+  const wrap = (st) => ({
+    __raw: st,
+    bind: (...a) => wrap(st.bind(...a)),
+    all: async () => { const r = await st.all(); addUse(r.meta); return r; },
+    run: async () => { const r = await st.run(); addUse(r.meta); return r; },
+    first: async (col) => {
+      const r = await st.all();
+      addUse(r.meta);
+      const row = (r.results || [])[0] ?? null;
+      return col ? (row ? row[col] : null) : row;
+    },
+  });
+  return { __metered: true, prepare: (sql) => wrap(db.prepare(sql)),
+           batch: async (stmts) => { const res = await db.batch(stmts.map((x) => x.__raw || x)); res.forEach((x) => addUse(x.meta)); return res; } };
+}
+const utcDay = () => new Date().toISOString().slice(0, 10);
+async function flushUse(env) {  // one small write: today's totals += what this run used
+  if (!USE.r && !USE.w) return;
+  const r = USE.r, w = USE.w;
+  USE.r = 0; USE.w = 0;
+  try {
+    const day = utcDay();
+    await env.DB.prepare(`INSERT INTO state (k, v) VALUES ('d1_use', json_object('day', ?1, 'r', ?2, 'w', ?3))
+      ON CONFLICT(k) DO UPDATE SET v = CASE WHEN json_extract(v, '$.day') = ?1
+        THEN json_object('day', ?1, 'r', json_extract(v, '$.r') + ?2, 'w', json_extract(v, '$.w') + ?3)
+        ELSE json_object('day', ?1, 'r', ?2, 'w', ?3) END`).bind(day, r, w).run();
+  } catch (_) { /* D1 down: nothing to save */ }
+}
+async function d1Use(env) {
+  const u = await getState(env, "d1_use", null);
+  return u && u.day === utcDay() ? u : { day: utcDay(), r: 0, w: 0 };
+}
+const d1Tight = (u) => u.r > D1_SOFT * D1_READ_LIMIT || u.w > D1_SOFT * D1_WRITE_LIMIT;
+
 async function getState(env, k, dflt = null) {
   const r = await env.DB.prepare("SELECT v FROM state WHERE k = ?").bind(k).first();
   return r ? JSON.parse(r.v) : dflt;
@@ -942,7 +986,9 @@ async function onTelegram(env, update) {
       `${st.waiting_ai ? "⏳" : "✅"} Waiting for the AI check: ${st.waiting_ai}` +
       (st.oldest_waiting_min !== null ? ` (oldest ${ago(st.oldest_waiting_min)})` : "") +
       (st.stuck_ai ? ` · ⚠️ ${st.stuck_ai} failed 3 times` : "") + "\n" +
-      `🔔 Alerts: ${st.alerts_24h} in 24 h, last ${ago(st.last_alert_min)}${p.alerts_paused ? " · ⚠️ PAUSED (send /resume)" : ""}`);
+      `🔔 Alerts: ${st.alerts_24h} in 24 h, last ${ago(st.last_alert_min)}${p.alerts_paused ? " · ⚠️ PAUSED (send /resume)" : ""}
+` +
+      `💾 Cloud database today: ${Math.round(p.d1.r / 50000)}% of free reads, ${Math.round(p.d1.w / 1000)}% of free writes`);
   } else if (text.startsWith("/laptopoff") || text.startsWith("/cloud")) {
     // Hand everything to the cloud now: forget any laptop heartbeat (an always-on laptop pauses the cloud's
     // readers for 15 min) and start the GitHub reader (LinkedIn + Indeed) at once instead of within 10 min.
@@ -1018,7 +1064,7 @@ async function pipelineStatus(env) {
     FROM jobs WHERE found_at > ?`).bind(t - H, t - H, t - H, t - H, t - 24 * H).first();
   const a = await env.DB.prepare(`SELECT SUM(at > ?) AS sent_1h, COUNT(*) AS sent_24h, MAX(at) AS last FROM alerts
     WHERE at > ? AND text != '' AND COALESCE(state, '') NOT IN ('old', 'dup')`).bind(t - H, t - 24 * H).first();
-  return { now: t, sources, stages: { found_1h: s.found_1h || 0, rule_rejected_1h: s.rule_1h || 0, waiting_ai: s.waiting || 0,
+  return { now: t, d1: await d1Use(env), sources, stages: { found_1h: s.found_1h || 0, rule_rejected_1h: s.rule_1h || 0, waiting_ai: s.waiting || 0,
            oldest_waiting_min: mins(s.oldest_waiting), stuck_ai: s.stuck || 0, approved_1h: s.kept_1h || 0,
            ai_rejected_1h: s.ai_rejected_1h || 0, alerts_1h: a.sent_1h || 0, alerts_24h: a.sent_24h || 0, last_alert_min: mins(a.last) },
            alerts_paused: !!(await getState(env, "alerts_off", false)), last_error: await getState(env, "last_error", null) };
@@ -1041,6 +1087,14 @@ async function dispatchReader(env, b) {
 
 async function tick(env, only = null) {
   const b = new Budget(45);
+  const use = await d1Use(env);
+  const tight = d1Tight(use);
+  if (tight && (await getState(env, "d1_warned", "")) !== use.day) {  // once a day: tell the owner before D1 blocks
+    await setState(env, "d1_warned", use.day);
+    if (env.TELEGRAM_CHAT_ID) await tg(env, b, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML",
+      text: `⚠️ <b>Cloud database use is high today</b>: ${Math.round(use.r / 50000)}% of the free reads, ${Math.round(use.w / 1000)}% of the free writes. ` +
+            "Extra checks are slowed down. If it reaches 100%, the cloud stops until 05:30 IST; open the laptop app and it takes over." }).catch(() => {});
+  }
   // Nov 5 2026: the laptop can't stay on, so the cloud reads all the time (the laptop app only syncs, without
   // pausing this). LinkedIn here was mostly rate-limited (Cloudflare IPs): the GitHub reader does LinkedIn + Indeed.
   const laptopOnline = now() - (await getState(env, "laptop_seen", 0)) < LAPTOP_QUIET_MS;  // only an old always-on laptop
@@ -1076,7 +1130,7 @@ async function tick(env, only = null) {
     if (j.posted_days != null && j.posted_days > CONFIG.posted_within_days) continue;
     if (await sendAlert(env, b, { uid: j.id, text: jobText(j), url: j.url, blog_url: j.blog_url, source: j.source, keys: await looseKeys(j) })) sent++;
   }
-  if (sent < MAX_ALERTS_PER_RUN && b.left > 6) {
+  if (sent < MAX_ALERTS_PER_RUN && b.left > 6 && Math.floor(now() / 60000) % (tight ? 30 : 5) === 0) {
     const missed = (await env.DB.prepare(`SELECT j.* FROM jobs j LEFT JOIN alerts a ON a.uid = j.id
       WHERE j.status = 'keep' AND a.uid IS NULL AND j.found_at > ? ORDER BY j.found_at DESC LIMIT 6`).bind(now() - DAY).all()).results;
     for (const j of missed) {
@@ -1089,8 +1143,18 @@ async function tick(env, only = null) {
       if (await sendAlert(env, b, { uid: j.id, text: jobText(job), url: j.url, blog_url: j.blog_url, source: j.source, keys: await looseKeys(j) })) sent++;
     }
   }
-  // tidy up: jobs older than 21 days
-  if (Math.floor(now() / 60000) % 1440 === 0) await env.DB.prepare("DELETE FROM jobs WHERE found_at < ?").bind(now() - 21 * DAY).run();
+  // tidy up once a day (all by indexed time columns): jobs > 21 days (= KEEP_JOBS_DAYS), seen ids > 45 days (a
+  // repost after that is checked again, the too_old rule drops stale ones), claims past SHOWN_FOR, alerts/actions > 30 days
+  if (!only && now() - (await getState(env, "cleanup", 0)) > DAY) {
+    await setState(env, "cleanup", now());
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM jobs WHERE found_at < ?").bind(now() - 21 * DAY),
+      env.DB.prepare("DELETE FROM seen WHERE at < ?").bind(now() - 45 * DAY),
+      env.DB.prepare("DELETE FROM claims WHERE at < ?").bind(now() - SHOWN_FOR),
+      env.DB.prepare("DELETE FROM alerts WHERE at < ?").bind(now() - 30 * DAY),
+      env.DB.prepare("DELETE FROM actions WHERE at < ?").bind(now() - 30 * DAY),
+    ]).catch(async (e) => setState(env, "last_error", `cleanup: ${String(e).slice(0, 200)}`));
+  }
   return { added, ai_kept: kept.length, alerts: sent, requests_left: b.left };
 }
 
@@ -1104,15 +1168,35 @@ let indexesOk = false;
 async function ensureIndexes(env) {
   if (indexesOk) return;
   try {
-    await env.DB.prepare("CREATE INDEX IF NOT EXISTS seen_at ON seen(at)").run();
+    await env.DB.batch([
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS seen_at ON seen(at)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS claims_at ON claims(at)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS alerts_at ON alerts(at)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS actions_at ON actions(at)"),
+    ]);
     indexesOk = true;
   } catch (_) { /* D1 unavailable: next tick */ }
 }
 
 export default {
-  async scheduled(_event, env, ctx) { ctx.waitUntil(ensureIndexes(env).then(() => tick(env))); },
+  async scheduled(_event, env0, ctx) {
+    const env = { ...env0, DB: metered(env0.DB) };
+    ctx.waitUntil(ensureIndexes(env).then(() => tick(env)).finally(() => flushUse(env)));
+  },
 
-  async fetch(req, env) {
+  async fetch(req, env0, ctx) {
+    const env = { ...env0, DB: metered(env0.DB) };
+    try {
+      await ensureIndexes(env);
+      return await route(req, env);
+    } finally {
+      ctx.waitUntil(flushUse(env));
+    }
+  },
+};
+
+async function route(req, env) {
+  {
     const url = new URL(req.url);
     if (url.pathname === "/api/health") return json({ ok: true });
     if (url.pathname === "/app" || url.pathname.startsWith("/app/")) return handleApp(req, env, url, setState, getState, pipelineStatus);  // password dashboard
@@ -1128,7 +1212,7 @@ export default {
       const seen = (hb.seen || []).slice(0, 400);
       if (seen.length) {
         const t = now();
-        await env.DB.batch(seen.map((id) => env.DB.prepare("INSERT INTO seen (id, at) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET at = excluded.at").bind(String(id), t)));
+        await env.DB.batch(seen.map((id) => env.DB.prepare("INSERT OR IGNORE INTO seen (id, at) VALUES (?, ?)").bind(String(id), t)));
       }
       return json({ ok: true, seen: seen.length });
     }
@@ -1151,8 +1235,8 @@ export default {
       return json({ jobs: rows });
     }
     if (url.pathname === "/api/status") {
-      const c = await env.DB.prepare("SELECT COUNT(*) AS n, SUM(status='keep') AS k, SUM(status='new') AS p, SUM(status='reject') AS r FROM jobs").first();
-      return json({ laptop_seen: await getState(env, "laptop_seen", 0), jobs: c, last_error: await getState(env, "last_error", null),
+      const c = await env.DB.prepare("SELECT COUNT(*) AS n, SUM(status='keep') AS k, SUM(status='new') AS p, SUM(status='reject') AS r FROM jobs WHERE found_at > ?").bind(now() - DAY).first();
+      return json({ d1: await d1Use(env), laptop_seen: await getState(env, "laptop_seen", 0), jobs: c, last_error: await getState(env, "last_error", null),
                     li_backoff: await getState(env, "li_backoff", 0), naukri: await getState(env, "nk", {}) });
     }
     if (url.pathname === "/api/tick" && req.method === "POST") return json(await tick(env, url.searchParams.get("step")));  // manual run (testing)
@@ -1167,10 +1251,15 @@ export default {
       if (quiet) {
         // The reader keeps what it got and asks only for IDs added since its last round (`since`): sending the whole
         // 21-day list every ~2 min from 3 machines read >5M D1 rows a day (free limit, Nov 5).
-        const since = Math.max(+(url.searchParams.get("since") || 0) - 5 * 60000, asOf - 21 * DAY);  // = KEEP_JOBS_DAYS
-        const rows = (await env.DB.prepare("SELECT id FROM seen WHERE at > ? AND (id LIKE 'LinkedIn:%' OR id LIKE 'Indeed:%')")
-          .bind(since).all()).results;
-        known = rows.map((r) => r.id);
+        const since = +(url.searchParams.get("since") || 0);
+        const boards = (url.searchParams.get("boards") || "LinkedIn,Indeed").split(",").filter((x) => ["LinkedIn", "Indeed"].includes(x));
+        for (const src of boards) {
+          const rows = since
+            ? (await env.DB.prepare("SELECT id FROM seen INDEXED BY seen_at WHERE at > ? AND id >= ? AND id < ?")
+                .bind(since - 5 * 60000, `${src}:`, `${src};`).all()).results  // only ids added since the last round
+            : (await env.DB.prepare("SELECT id FROM seen WHERE id >= ? AND id < ?").bind(`${src}:`, `${src};`).all()).results;  // PK range
+          known.push(...rows.map((r) => r.id));
+        }
       }
       return json({ quiet, as_of: asOf, laptop_seen: laptopSeen, read, known, li_searches: CONFIG.li_searches,
                     indeed_roles: CONFIG.indeed_roles || [], places: CONFIG.places || [],
@@ -1194,6 +1283,6 @@ export default {
       return json({ added });
     }
     return json({ detail: "not found" }, 404);
-  },
-};
+  }
+}
 export { looseKeys, decide, titleExcluded, boardReject, parsePost, condense };
