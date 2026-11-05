@@ -34,6 +34,15 @@
       .aa .plat { display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--line-strong); border-radius: 8px;
                   padding: 5px 10px; cursor: pointer; }
       .aa .plat input { margin: 0; }
+      .aa .pick { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; padding: 0 10px; margin: 8px 0; }
+      .aa .pick label.jr { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--line); cursor: pointer; }
+      .aa .pick label.jr:first-child { border-top: 0; }
+      .aa .pick .jr input { margin-top: 4px; }
+      .aa .pick .jr .who { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+      .aa .mini { border: 0; background: none; color: var(--text-2); cursor: pointer; font: inherit; font-size: .8rem; padding: 2px 4px; }
+      .aa .mini:hover { color: var(--text); text-decoration: underline; }
+      .aa details { margin: 8px 0; }
+      .aa summary { cursor: pointer; }
       .aa .logwrap { max-height: 520px; overflow: auto; }
     </style>
   </head>
@@ -45,7 +54,30 @@
       </header>
 
       <section class="panel">
-        <div id="platforms" class="row" style="margin-bottom:10px"><span class="small muted">Loading platforms…</span></div>
+        <div id="chooser">
+          <h2 style="margin-top:0">Choose what to apply to</h2>
+          <div id="platforms" class="row"><span class="small muted">Loading jobs…</span></div>
+          <div class="row" style="margin:10px 0">
+            <label class="small">Found
+              <select id="hours">
+                <option value="1">in the last hour</option><option value="3">in the last 3 hours</option>
+                <option value="6">in the last 6 hours</option><option value="12">in the last 12 hours</option>
+                <option value="24">in the last 24 hours</option><option value="72">in the last 3 days</option>
+                <option value="" selected>any time</option>
+              </select></label>
+            <input id="q" type="search" placeholder="Search title or company" style="flex:1 1 180px;min-width:0" />
+          </div>
+          <div class="row" style="justify-content:space-between"><b id="pickCount"></b>
+            <span class="row"><button class="chip" type="button" data-pick="all">Tick all shown</button>
+            <button class="chip" type="button" data-pick="none">Untick all shown</button></span></div>
+          <div class="pick" id="pickList"></div>
+          <details><summary>🚫 Companies you never auto-apply to (<span id="nBlocked">0</span>)</summary>
+            <div class="row" style="margin:8px 0"><input id="blockInput" list="companies" placeholder="Company name" style="flex:1 1 200px;min-width:0" />
+              <datalist id="companies"></datalist><button class="btn" type="button" id="blockBtn">Block company</button></div>
+            <div id="blockedList" class="row"></div></details>
+          <details><summary>⛔ Jobs never auto-applied again (<span id="nNever">0</span>): skipped by you, closed, not eligible, failed twice</summary>
+            <div id="neverList"></div></details>
+        </div>
         <div class="row" id="controls">
           <button class="btn primary" id="start">▶ Start on the ticked platforms</button>
           <button class="btn" id="pause">⏸ Pause</button>

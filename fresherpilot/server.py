@@ -1042,6 +1042,8 @@ class AutoApplyRequest(BaseModel):
     uids: list[str] | None = None  # one job (its Auto-apply button) or None = best matches
     max: int = 0  # 0 = no limit
     sources: list[str] | None = None  # only these platforms (LinkedIn, Naukri, Indeed...); None = all
+    pick: list[str] | None = None  # bulk run over exactly these jobs (ticked on the Auto-apply page)
+    hours: float | None = None  # only jobs found in the last N hours
 
 
 @app.post("/api/autoapply")
@@ -1049,9 +1051,31 @@ def start_autoapply(body: AutoApplyRequest) -> dict:
     from fresherpilot.apply import autoapply
 
     try:
-        return autoapply.start(body.uids, body.max, body.sources)
+        return autoapply.start(body.uids, body.max, body.sources, body.pick, body.hours)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class AutoApplyChoice(BaseModel):
+    action: str  # block | unblock (company) ; allow | never (uid)
+    company: str = ""
+    uid: str = ""
+
+
+@app.get("/api/autoapply/choices")
+def autoapply_choices() -> dict:
+    from fresherpilot.apply import autoapply
+
+    return autoapply.choices()
+
+
+@app.post("/api/autoapply/choices")
+def autoapply_set_choice(body: AutoApplyChoice) -> dict:
+    from fresherpilot.apply import autoapply
+
+    if body.action not in ("block", "unblock", "allow", "never"):
+        raise HTTPException(status_code=400, detail="action must be block, unblock, allow or never")
+    return autoapply.set_choice(body.action, body.company, body.uid)
 
 
 @app.get("/api/autoapply/preview")

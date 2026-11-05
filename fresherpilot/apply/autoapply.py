@@ -45,6 +45,131 @@ SETTINGS = {"step_delay": [0.8, 2.0], "before_submit": [1.5, 3.0], "between_jobs
 
 # ---------------------------------------------------------------- queue
 
+# ---------------------------------------------------------------- your choices (users/<id>/autoapply_prefs.json)
+# never:   jobs auto-apply must not try again (you skipped it, it's closed / you're not eligible, or it failed twice).
+#          Per job ("that JD"): its uid + description fingerprint, so a repost or the same post on another board is
+#          left out too, but other openings at the same company are not.
+# blocked: companies you never want auto-applied to.
+# fails:   failed attempts per job (2 = never again).
+NEVER_AGAIN = re.compile(r"skipped by you|applied by you|no longer accepting|not (?:currently )?accepting|"
+                         r"applications? (?:are|is|have been|has been) closed|job (?:is )?closed|posting (?:is )?closed|"
+                         r"not eligible|not found|expired|no longer (?:available|active|open)|position (?:has been )?filled|"
+                         r"already applied", re.I)
+MAX_FAILS = 2
+_prefs_lock = threading.Lock()
+
+
+def _prefs_path() -> Path:
+    from fresherpilot.core import users
+
+    return users.path("autoapply_prefs.json")
+
+
+def load_prefs() -> dict[str, Any]:
+    if not _prefs_path().exists():
+        return _prefs_from_log()
+    try:
+        data = json.loads(_prefs_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    return {"never": data.get("never") or {}, "blocked": data.get("blocked") or [], "fails": data.get("fails") or {}}
+
+
+def _prefs_from_log() -> dict[str, Any]:
+    """First use: earlier runs' outcomes from the auto-apply log (skipped by you / closed = never again, failures counted)."""
+    data: dict[str, Any] = {"never": {}, "blocked": [], "fails": {}}
+    try:
+        lines = _log_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        uid, detail = e.get("uid"), str(e.get("detail") or "")
+        if not uid:
+            continue
+        if e.get("event") == "skipped" and NEVER_AGAIN.search(detail):
+            data["never"][uid] = {"reason": detail[:160], "at": e.get("at"), "title": e.get("title"), "company": e.get("company"),
+                                  "keys": [uid]}
+        elif e.get("event") == "failed":
+            data["fails"][uid] = int(data["fails"].get(uid, 0)) + 1
+            if data["fails"][uid] >= MAX_FAILS:
+                data["never"][uid] = {"reason": f"failed {data['fails'][uid]} times (last: {detail[:120]})", "at": e.get("at"),
+                                      "title": e.get("title"), "company": e.get("company"), "keys": [uid]}
+    _save_prefs(data)
+    return data
+
+
+def _save_prefs(data: dict[str, Any]) -> None:
+    from fresherpilot.core import users
+
+    users.write_atomic(_prefs_path(), json.dumps(data, indent=1, ensure_ascii=False))
+
+
+def _company(job: dict[str, Any]) -> str:
+    return re.sub(r"\s+", " ", str(job.get("employer") or job.get("company") or "")).strip()
+
+
+def _jd_keys(job: dict[str, Any]) -> list[str]:
+    """The job's id + its description fingerprint (same post on another board / reposted)."""
+    from fresherpilot.jobs import visited
+
+    ks = visited.keys(job)
+    return [ks[0]] + [k for k in ks if k.startswith("ds:")]
+
+
+def remember_never(uid: str, reason: str, item: dict[str, Any] | None = None) -> None:
+    item = item or {}
+    with _prefs_lock:
+        data = load_prefs()
+        data["never"][uid] = {"reason": reason[:160], "at": datetime.now(timezone.utc).isoformat(),
+                              "title": item.get("title"), "company": item.get("company"), "source": item.get("source"),
+                              "keys": item.get("jd_keys") or [uid]}
+        data["fails"].pop(uid, None)
+        _save_prefs(data)
+
+
+def _note_outcome(event: str, uid: str, detail: str, item: dict[str, Any] | None) -> None:
+    """After a job's final result: remember the ones auto-apply must not try again."""
+    if event == "skipped" and NEVER_AGAIN.search(detail or ""):
+        remember_never(uid, detail, item)
+    elif event == "failed":
+        with _prefs_lock:
+            data = load_prefs()
+            data["fails"][uid] = int(data["fails"].get(uid, 0)) + 1
+            n = data["fails"][uid]
+            _save_prefs(data)
+        if n >= MAX_FAILS:
+            remember_never(uid, f"failed {n} times (last: {detail})", item)
+
+
+def set_choice(action: str, company: str = "", uid: str = "") -> dict[str, Any]:
+    """block / unblock a company; allow = let a never-again job be auto-applied again; never = leave a job out."""
+    with _prefs_lock:
+        data = load_prefs()
+        name = re.sub(r"\s+", " ", company or "").strip()
+        if action == "block" and name and name.lower() not in {c.lower() for c in data["blocked"]}:
+            data["blocked"].append(name)
+        elif action == "unblock" and name:
+            data["blocked"] = [c for c in data["blocked"] if c.lower() != name.lower()]
+        elif action == "allow" and uid:
+            data["never"].pop(uid, None)
+            data["fails"].pop(uid, None)
+        elif action == "never" and uid:
+            data["never"][uid] = {"reason": "left out by you", "at": datetime.now(timezone.utc).isoformat(), "keys": [uid]}
+        _save_prefs(data)
+    return choices()
+
+
+def choices() -> dict[str, Any]:
+    data = load_prefs()
+    never = [{"uid": u, **{k: v for k, v in e.items() if k != "keys"}} for u, e in data["never"].items()]
+    never.sort(key=lambda e: e.get("at") or "", reverse=True)
+    return {"blocked": sorted(data["blocked"], key=str.lower), "never": never}
+
+
 def emailed_only() -> set[str]:
     """Jobs applied to by email but not yet on the job site (from the auto-apply log)."""
     mailed, site = set(), set()
@@ -77,6 +202,9 @@ def eligible_jobs(include_with_instructions: bool = False) -> list[dict[str, Any
 
     apps = applicant.applications()
     email_only = emailed_only()
+    prefs = load_prefs()
+    never_keys = {k for e in prefs["never"].values() for k in (e.get("keys") or [])} | set(prefs["never"])
+    blocked = {c.lower() for c in prefs["blocked"]}
     out = []
     for job in _normalized_jobs(load_cache()):
         if not (job.get("url") or "").startswith("http"):
@@ -89,6 +217,10 @@ def eligible_jobs(include_with_instructions: bool = False) -> list[dict[str, Any
             continue
         job["uid"] = uid
         job["employer"] = contacts.resolve_company(job)
+        if blocked and (_company(job).lower() in blocked or str(job.get("company") or "").strip().lower() in blocked):
+            continue
+        if uid in never_keys or (never_keys and any(k in never_keys for k in _jd_keys(job))):
+            continue
         job["apply_instructions"] = verdict.get("apply_instructions")
         out.append(job)
     return _easy_first(_newest_first(out))
@@ -178,21 +310,44 @@ def preview() -> dict[str, Any]:
     from fresherpilot.outreach.telegram_bot import apply_mode
 
     per: dict[str, dict[str, int]] = {}
+    jobs = []
     for j in eligible_jobs(include_with_instructions=True):
         c = per.setdefault(str(j.get("source") or "Other"), {"total": 0, "easy": 0})
         c["total"] += 1
         c["easy"] += apply_mode(j) == "easy"
+        jobs.append({"uid": j["uid"], "title": j.get("title"), "company": _company(j), "source": j.get("source") or "Other",
+                     "found": j.get("first_seen") or "", "posted": j.get("posted") or "", "location": j.get("location") or "",
+                     "mode": apply_mode(j), "url": j.get("url")})
     order = list(_EASY_ORDER) + ["Careers", "Telegram"]
-    return {"platforms": [{"source": k, **v} for k, v in sorted(per.items(), key=lambda kv: (order.index(kv[0]) if kv[0] in order else 99, kv[0]))]}
+    return {"platforms": [{"source": k, **v} for k, v in sorted(per.items(), key=lambda kv: (order.index(kv[0]) if kv[0] in order else 99, kv[0]))],
+            "jobs": jobs, **choices()}
 
 
-def start(uids: list[str] | None, max_jobs: int = 0, sources: list[str] | None = None) -> dict[str, Any]:
+def start(uids: list[str] | None, max_jobs: int = 0, sources: list[str] | None = None,
+          pick: list[str] | None = None, hours: float | None = None) -> dict[str, Any]:
     with _lock:
         if STATE["running"]:
             raise RuntimeError("Auto-apply is already running")
     single = bool(uids)
     done_email = emailed_only()
     jobs = eligible_jobs(include_with_instructions=True)
+    if pick and not uids:  # the jobs ticked on the Auto-apply page (bulk run, Easy Apply first as usual)
+        chosen = set(pick)
+        jobs = [j for j in jobs if j["uid"] in chosen]
+        if not jobs:
+            raise RuntimeError("None of the jobs you picked can be auto-applied any more (applied, skipped or blocked).")
+    if hours and not uids:  # only jobs found in the last N hours
+        cutoff = datetime.now(timezone.utc).timestamp() - float(hours) * 3600
+
+        def found(j: dict[str, Any]) -> float:
+            try:
+                return datetime.fromisoformat(str(j.get("first_seen") or "").replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return 0.0
+
+        jobs = [j for j in jobs if found(j) >= cutoff]
+        if not jobs:
+            raise RuntimeError(f"No approved jobs found in the last {hours:g} hours that are left to apply to.")
     if sources and not uids:  # only the platforms ticked on the Auto-apply page
         wanted_src = set(sources)
         jobs = [j for j in jobs if str(j.get("source") or "Other") in wanted_src]
@@ -208,7 +363,7 @@ def start(uids: list[str] | None, max_jobs: int = 0, sources: list[str] | None =
     queue, browser, emails, manual = [], [], [], []
     for j in jobs:
         item = {"uid": j["uid"], "url": j["url"], "title": j["title"], "company": j.get("employer") or j.get("company"),
-                "source": j.get("source")}
+                "source": j.get("source"), "jd_keys": _jd_keys(j)}
         kind, info = _instruction_plan(j)
         if kind == "email":  # apply on the job site AND send the email the post asks for
             if j["uid"] not in done_email:
@@ -284,6 +439,11 @@ def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any
         if event in ("applied", "skipped", "failed") and uid:
             STATE["parked"].pop(uid, None)
             STATE["job_commands"].pop(uid, None)
+    if event in ("skipped", "failed") and uid:
+        try:
+            _note_outcome(event, uid, detail, job)
+        except Exception:  # noqa: BLE001 — never let bookkeeping break a run
+            pass
     if event in ("applied", "emailed") and uid:
         applicant.set_application(uid, "applied", note="auto-applied" if event == "applied" else "emailed")
         from fresherpilot.jobs import visited
