@@ -66,19 +66,67 @@ def ensure_running(start_checker: Callable[[], Any], start_fetch: Callable[[], A
         from fresherpilot.outreach import telegram_bot
 
         users.thread(telegram_bot.bot_loop, lambda: True, lambda: start_checker())
+        users.thread(_cloud_failover, start_checker, start_fetch)
         return
+    s = _start_readers(start_checker, start_fetch)
+    if not s:
+        return
+    from fresherpilot.outreach import telegram_bot
+
+    users.thread(telegram_bot.bot_loop, lambda: s["running"], lambda: s["check"]())  # alert buttons + /jobs, or the cloud sync
+
+
+def _start_readers(start_checker: Callable[[], Any], start_fetch: Callable[[], Any]) -> dict[str, Any] | None:
+    """The always-on readers: LinkedIn non-stop, the other boards every few minutes, Naukri on Apify."""
+    uid = users.current() or ""
     with _lock:
         if uid in _state and _state[uid]["running"]:
-            return
+            return None
         s = _state[uid] = _new_state(start_checker, start_fetch)
     users.thread(_linkedin_loop, s)
     for board in _SLOW_BOARDS:
         if board in cfg.LIVE_BOARDS:
             users.thread(_board_loop, s, board)
     users.thread(_fetch_loop, s)
+    return s
+
+
+FAILOVER_EVERY = 180  # s between cloud health checks
+FAILOVER_AFTER = 2    # failed checks in a row before the laptop takes over (~6 min)
+RECOVER_AFTER = 5     # good checks in a row before it hands back (~15 min)
+
+
+def _cloud_failover(start_checker: Callable[[], Any], start_fetch: Callable[[], Any]) -> None:
+    """Manual mode: while the app is open, if the cloud is down (Worker error, D1 daily limit...), this laptop reads
+    every board itself, like the old always-on mode, until the cloud has been healthy for a while again."""
     from fresherpilot.outreach import telegram_bot
 
-    users.thread(telegram_bot.bot_loop, lambda: s["running"], lambda: s["check"]())  # alert buttons + /jobs, or the cloud sync
+    if not telegram_bot._cloud():
+        return
+    bad = good = 0
+    live: dict[str, Any] | None = None
+    while True:
+        try:
+            # cheap: an index range on found_at that returns nothing; any D1 / Worker failure raises
+            telegram_bot._cloud_call(f"/api/jobs?since={int(time.time() * 1000)}", timeout=25)
+            good, bad = good + 1, 0
+        except Exception as exc:  # noqa: BLE001
+            bad, good = bad + 1, 0
+            err = str(exc)[:120]
+        if live is None and bad >= FAILOVER_AFTER:
+            live = _start_readers(start_checker, start_fetch)
+            if live:
+                print(f"[failover] cloud down ({err}): this laptop now reads every job site itself", flush=True)
+                try:
+                    telegram_bot.send("⚠️ The cloud is down, so your laptop is reading every job site now. "
+                                      "Keep the app open; it hands back when the cloud is fine again.")
+                except Exception:  # noqa: BLE001
+                    pass
+        elif live is not None and good >= RECOVER_AFTER:
+            live["running"] = False
+            live = None
+            print("[failover] cloud is back: the laptop stops reading (manual mode again)", flush=True)
+        time.sleep(FAILOVER_EVERY)
 
 
 def _new_state(start_checker: Callable[[], Any], start_fetch: Callable[[], Any]) -> dict[str, Any]:

@@ -1098,8 +1098,19 @@ async function tick(env, only = null) {
 
 const json = (d, s = 200) => new Response(JSON.stringify(d), { status: s, headers: { "Content-Type": "application/json" } });
 
+// The reader's "known since" query needs this index (without it every call scans all of `seen`). Created by the
+// Worker itself so it lands as soon as D1 accepts reads again; a no-op once it exists.
+let indexesOk = false;
+async function ensureIndexes(env) {
+  if (indexesOk) return;
+  try {
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS seen_at ON seen(at)").run();
+    indexesOk = true;
+  } catch (_) { /* D1 unavailable: next tick */ }
+}
+
 export default {
-  async scheduled(_event, env, ctx) { ctx.waitUntil(tick(env)); },
+  async scheduled(_event, env, ctx) { ctx.waitUntil(ensureIndexes(env).then(() => tick(env))); },
 
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -1152,12 +1163,16 @@ export default {
       const quiet = now() - laptopSeen >= LAPTOP_QUIET_MS || url.searchParams.get("force") === "1";  // force = testing
       const read = await getState(env, "gh_read", {});
       let known = [];
+      const asOf = now();
       if (quiet) {
+        // The reader keeps what it got and asks only for IDs added since its last round (`since`): sending the whole
+        // 21-day list every ~2 min from 3 machines read >5M D1 rows a day (free limit, Nov 5).
+        const since = Math.max(+(url.searchParams.get("since") || 0) - 5 * 60000, asOf - 21 * DAY);  // = KEEP_JOBS_DAYS
         const rows = (await env.DB.prepare("SELECT id FROM seen WHERE at > ? AND (id LIKE 'LinkedIn:%' OR id LIKE 'Indeed:%')")
-          .bind(now() - 21 * DAY).all()).results;  // = KEEP_JOBS_DAYS
+          .bind(since).all()).results;
         known = rows.map((r) => r.id);
       }
-      return json({ quiet, laptop_seen: laptopSeen, read, known, li_searches: CONFIG.li_searches,
+      return json({ quiet, as_of: asOf, laptop_seen: laptopSeen, read, known, li_searches: CONFIG.li_searches,
                     indeed_roles: CONFIG.indeed_roles || [], places: CONFIG.places || [],
                     posted_within_days: CONFIG.posted_within_days });
     }

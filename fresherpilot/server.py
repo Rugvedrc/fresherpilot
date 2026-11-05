@@ -1035,7 +1035,7 @@ def set_application(body: ApplicationRequest) -> dict:
 
 class AutoApplyRequest(BaseModel):
     uids: list[str] | None = None  # one job (its Auto-apply button) or None = best matches
-    max: int = 25
+    max: int = 0  # 0 = no limit
 
 
 @app.post("/api/autoapply")

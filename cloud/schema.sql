@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS jobs (            -- jobs found by the Worker (laptop
   within_min INTEGER,                        -- the read only returned jobs posted within this many minutes
   apply_mode TEXT                            -- easy = apply inside the board's app (mobile), site = company site
 );
+CREATE INDEX IF NOT EXISTS seen_at ON seen(at);  -- the reader's "known since" query
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, found_at);
 CREATE INDEX IF NOT EXISTS jobs_found ON jobs(found_at);
 CREATE TABLE IF NOT EXISTS claims (          -- loose keys of alerted / known jobs: one alert per real job

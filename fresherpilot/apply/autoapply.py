@@ -139,7 +139,7 @@ def _easy_first(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(jobs, key=key)  # stable: keeps newest first inside each group
 
 
-def start(uids: list[str] | None, max_jobs: int = 25) -> dict[str, Any]:
+def start(uids: list[str] | None, max_jobs: int = 0) -> dict[str, Any]:
     with _lock:
         if STATE["running"]:
             raise RuntimeError("Auto-apply is already running")
@@ -150,7 +150,8 @@ def start(uids: list[str] | None, max_jobs: int = 25) -> dict[str, Any]:
         jobs = [j for j in jobs if j["uid"] in wanted]
         if not jobs:
             raise RuntimeError("That job isn't eligible (already applied, or not approved).")
-    jobs = jobs[: max(1, min(max_jobs, 50))]
+    if max_jobs > 0:  # 0 = no limit: every approved job, Easy Apply ones first
+        jobs = jobs[:max_jobs]
     queue, browser, emails, manual = [], [], [], []
     for j in jobs:
         item = {"uid": j["uid"], "url": j["url"], "title": j["title"], "company": j.get("employer") or j.get("company"),

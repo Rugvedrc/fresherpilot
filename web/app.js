@@ -998,12 +998,12 @@ async function startAutoApply(uids) {
     alert("Auto-apply runs inside the FresherPilot browser extension (so it uses your logins).\n\nInstall it, or reload it in edge://extensions / chrome://extensions, then refresh this page.");
     return;
   }
-  if (!uids && !confirm("Auto-apply to your best-matching jobs (up to 25), one by one in background tabs?\n\nIt pauses and asks you whenever a site needs you to sign in.")) return;
+  if (!uids && !confirm("Auto-apply to ALL your approved jobs, one by one in background tabs?\nEasy Apply jobs (LinkedIn, Naukri, Indeed...) go first, company sites after.\n\nJobs that need you (sign-in, a question, a form to submit) wait in the 'Waiting for you' list while it goes on.")) return;
   try {
     const res = await fetch("/api/autoapply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(uids ? { uids, max: uids.length } : { max: 25 }),
+      body: JSON.stringify(uids ? { uids, max: uids.length } : { max: 0 }),
     });
     const start = await res.json();
     if (!res.ok) throw new Error(start.detail || "Couldn't start auto-apply");
