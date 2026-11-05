@@ -208,11 +208,27 @@ async function waitForUser(tabId, job, reason, kind) {
   return "skip";
 }
 
-async function applyJob(job, settings, mode) {
-  const tab = await chrome.tabs.create({ url: job.url, active: mode === "single" });
-  let tabId = tab.id;
+// In "Auto-apply all", a job that needs you (sign in, CAPTCHA, a question, a form to submit) is SET ASIDE: its tab
+// stays open, the run goes on with the next job, and comes back to it once you've done it (detected on the page)
+// or pressed Continue for it in the app. A single job ("Auto-apply" on one job) still waits for you.
+async function needsYou(tabId, job, reason, kind, mode) {
+  if (mode !== "single") return { park: true, reason, kind };
+  const cmd = await waitForUser(tabId, job, reason, kind);
+  if (cmd === "stop") return { result: { event: "skipped", detail: "stopped by you", stop: true } };
+  if (cmd === "skip") return { result: { event: "skipped", detail: `skipped by you (${reason})` } };
+  return { continue: true };
+}
+
+async function applyJob(job, settings, mode, resumeTabId = null) {
+  let tabId = resumeTabId;
+  if (!tabId) tabId = (await chrome.tabs.create({ url: job.url, active: mode === "single" })).id;
   const opened = [tabId];
   applyingTab[tabId] = job.uid;
+  let parked = false;
+  const park = (reason, kind) => {
+    parked = true;
+    return { event: "parked", reason, kind, tabId };
+  };
   try {
     let filled = false;
     let submitted = false;
@@ -234,9 +250,9 @@ async function applyJob(job, settings, mode) {
       }
       if (snapshot.blocked) {
         const reason = snapshot.blocked === "login" ? "Sign in on this site" : "Solve the security check (CAPTCHA)";
-        const cmd = await waitForUser(tabId, job, reason, "blocked");
-        if (cmd === "stop") return { event: "skipped", detail: "stopped by you", stop: true };
-        if (cmd === "skip") return { event: "skipped", detail: `skipped by you (${reason})` };
+        const n = await needsYou(tabId, job, reason, "blocked", mode);
+        if (n.park) return park(reason, "blocked");
+        if (n.result) return n.result;
         filled = false;
         continue;
       }
@@ -267,9 +283,9 @@ async function applyJob(job, settings, mode) {
         return { event: "skipped", detail: decision.reason };
       }
       if (decision.action === "needs_user") {
-        const cmd = await waitForUser(tabId, job, decision.reason, "blocked");
-        if (cmd === "stop") return { event: "skipped", detail: "stopped by you", stop: true };
-        if (cmd === "skip") return { event: "skipped", detail: `skipped by you (${decision.reason})` };
+        const n = await needsYou(tabId, job, decision.reason, "manual", mode);
+        if (n.park) return park(decision.reason, "manual");
+        if (n.result) return n.result;
         filled = false;
         continue;
       }
@@ -285,9 +301,9 @@ async function applyJob(job, settings, mode) {
         const missing = await inTab(tabId, () => window.__jfAgent.emptyRequired());
         if (missing?.length) {
           const reason = `Answer: ${missing.slice(0, 3).join(", ")}`;
-          if (mode !== "single") return { event: "skipped", detail: `needs your answer: ${missing.slice(0, 3).join(", ")}` };
-          const cmd = await waitForUser(tabId, job, reason, "answers");
-          if (cmd !== "continue") return { event: "skipped", detail: cmd === "stop" ? "stopped by you" : "skipped by you", stop: cmd === "stop" };
+          const n = await needsYou(tabId, job, reason, "answers", mode);
+          if (n.park) return park(reason, "answers");
+          if (n.result) return n.result;
         }
         continue;
       }
@@ -295,7 +311,9 @@ async function applyJob(job, settings, mode) {
       const target = (snapshot.items || []).find((it) => it.key === decision.key);
       // A form from the job post's own instructions (Google Form...): filled, but YOU check it and submit.
       if (job.review && decision.is_submit) {
-        const cmd = await waitForUser(tabId, job, "Form filled: check the answers and press Submit yourself", "review");
+        const reason = "Form filled: check the answers and press Submit yourself";
+        if (mode !== "single") return park(reason, "review");
+        const cmd = await waitForUser(tabId, job, reason, "review");
         if (cmd === "stop") return { event: "skipped", detail: "stopped by you", stop: true };
         if (cmd === "skip") return { event: "skipped", detail: "form not submitted (skipped by you)" };
         return { event: "applied", detail: "form filled; submitted by you" };
@@ -318,8 +336,67 @@ async function applyJob(job, settings, mode) {
     }
     return { event: "skipped", detail: "too many steps" };
   } finally {
-    for (const id of opened) delete applyingTab[id];
-    if (mode !== "single") for (const id of opened) chrome.tabs.remove(id).catch(() => {});
+    if (!parked) {
+      for (const id of opened) delete applyingTab[id];
+      if (mode !== "single") for (const id of opened) chrome.tabs.remove(id).catch(() => {});
+    }
+  }
+}
+
+const PARK_MAX_MS = 45 * 60 * 1000;  // a set-aside job that waits longer than this is skipped
+
+// Has the user done what a set-aside job needed? (sign-in / CAPTCHA gone, answers filled, form submitted).
+// "manual" (e.g. an OTP or a question the AI can't answer) only resumes when you press Continue.
+async function parkedResolved(tabId, kind) {
+  if (kind === "manual") return false;
+  return inTab(tabId, (k) => {
+    const a = window.__jfAgent;
+    if (!a) return false;
+    if (k === "answers") return a.emptyRequired().length === 0;
+    if (k === "review") return /your response has been recorded|response (was |has been )?(recorded|submitted)|thanks for (submitting|filling)|form (was )?submitted/i.test(document.body?.innerText || "");
+    return a.blockedState() === "";
+  }, [kind]).catch(() => false);
+}
+
+// One pass over the set-aside jobs: resume those that are ready, skip those you skipped / closed / that waited too long.
+async function serviceParked(parked, settings, mode) {
+  for (const [uid, p] of [...parked]) {
+    const { command } = await api(`/api/autoapply/command?uid=${encodeURIComponent(uid)}`).catch(() => ({ command: null }));
+    const tab = await chrome.tabs.get(p.tabId).catch(() => null);
+    if (command === "open" && tab) {
+      await chrome.tabs.update(p.tabId, { active: true });
+      await chrome.windows.update(tab.windowId, { focused: true });
+      continue;
+    }
+    let outcome = null;
+    if (!tab) outcome = { event: "skipped", detail: "tab closed" };
+    else if (command === "skip") outcome = { event: "skipped", detail: `skipped by you (${p.reason})` };
+    else if (Date.now() - p.since > PARK_MAX_MS) outcome = { event: "skipped", detail: `waited ${PARK_MAX_MS / 60000} min for you (${p.reason})` };
+    else if (p.kind === "review" && (command === "continue" || (await parkedResolved(p.tabId, p.kind)))) {
+      outcome = { event: "applied", detail: "form filled; submitted by you" };
+    } else if (command === "continue" || (await parkedResolved(p.tabId, p.kind))) {
+      parked.delete(uid);
+      await report("resumed", uid, "you finished it: continuing this application");
+      let result;
+      try {
+        result = await applyJob(p.job, settings, mode, p.tabId);
+      } catch (err) {
+        result = { event: "failed", detail: String(err.message || err).slice(0, 200) };
+      }
+      if (result.event === "parked") {
+        parked.set(uid, { job: p.job, tabId: result.tabId, kind: result.kind, reason: result.reason, since: Date.now() });
+        await report("parked", uid, result.reason, { reason: result.reason, url: "", title: p.job.title });
+      } else {
+        await report(result.event, uid, result.detail);
+      }
+      continue;
+    }
+    if (outcome) {
+      parked.delete(uid);
+      delete applyingTab[p.tabId];
+      if (tab && outcome.event !== "applied") chrome.tabs.remove(p.tabId).catch(() => {});
+      await report(outcome.event, uid, outcome.detail);
+    }
   }
 }
 
@@ -329,9 +406,11 @@ async function runQueue(start) {
   // Chrome stops idle extension workers after ~30 s; a cheap API call every 20 s keeps this run alive.
   const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000);
   const { queue, settings, mode } = start;
+  const parked = new Map();  // uid -> { job, tabId, kind, reason, since }
   (async () => {
+    let stopped = false;
     try {
-      for (let i = 0; i < queue.length; i++) {
+      for (let i = 0; i < queue.length && !stopped; i++) {
         const job = queue[i];
         await report("job_start", job.uid);
         let result;
@@ -340,13 +419,30 @@ async function runQueue(start) {
         } catch (err) {
           result = { event: "failed", detail: String(err.message || err).slice(0, 200) };
         }
-        await report(result.event, job.uid, result.detail);
-        if (result.stop) break;
+        if (result.event === "parked") {
+          parked.set(job.uid, { job, tabId: result.tabId, kind: result.kind, reason: result.reason, since: Date.now() });
+          await report("parked", job.uid, result.reason, { reason: result.reason, url: "", title: job.title });
+        } else {
+          await report(result.event, job.uid, result.detail);
+        }
+        if (result.stop) stopped = true;
+        const { command } = await api("/api/autoapply/command").catch(() => ({ command: null }));
+        if (command === "stop") stopped = true;
+        if (parked.size) await serviceParked(parked, settings, mode);  // anything you finished meanwhile
+        if (!stopped && i < queue.length - 1) await sleep(rand(settings.between_jobs));
+      }
+      // Queue done: now only the set-aside jobs are left. Keep checking them until each is done or skipped.
+      while (parked.size && !stopped) {
+        await sleep(4000);
         const { command } = await api("/api/autoapply/command").catch(() => ({ command: null }));
         if (command === "stop") break;
-        if (i < queue.length - 1) await sleep(rand(settings.between_jobs));
+        await serviceParked(parked, settings, mode);
       }
     } finally {
+      for (const [uid, p] of parked) {  // stopped with jobs still set aside: their tabs stay open for you
+        delete applyingTab[p.tabId];
+        await report("skipped", uid, `run stopped while it waited for you (${p.reason}); the tab is still open`);
+      }
       clearInterval(keepAlive);
       running = false;
       await report("finished", null);

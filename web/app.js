@@ -918,7 +918,7 @@ $("showUnchecked").addEventListener("change", (e) => {
 // ---------------------------------------------------------------- auto-apply (runs in the extension)
 
 let autoPolling = false;
-const AUTO_ICON = { applied: "✅", skipped: "⏭", failed: "⚠", waiting: "✋", resumed: "▶", start: "▶", finished: "🏁" };
+const AUTO_ICON = { applied: "✅", skipped: "⏭", failed: "⚠", waiting: "✋", parked: "✋", resumed: "▶", start: "▶", finished: "🏁" };
 const hasExtension = () => !!document.documentElement.dataset.jobfinderExtension;
 
 // Talk to the FresherPilot extension through bridge.js (window messages).
@@ -945,6 +945,22 @@ function renderAuto(s) {
   const w = s.waiting;
   $("autoWaiting").hidden = !w;
   if (w) $("autoWaitingText").textContent = `Needs you: ${w.reason}. The tab is open in your browser; do it there, then click Continue.`;
+  // Jobs set aside because they need you: the run goes on; finish these whenever you can.
+  let parkedEl = $("autoParked");
+  if (!parkedEl) {
+    parkedEl = document.createElement("div");
+    parkedEl.id = "autoParked";
+    $("autoWaiting").after(parkedEl);
+  }
+  const parked = s.parked || [];
+  parkedEl.hidden = !parked.length;
+  parkedEl.innerHTML = parked.length ? `<div class="howto-banner" role="note"><strong>✋ Waiting for you (${parked.length})</strong>
+    <p class="small">Auto-apply moved on to the next jobs. Do these in their tabs whenever you can; each one continues by itself
+    once it's done (or press "Done, continue").</p><ul class="contact-list">${parked.map((p) => `<li>
+    <strong>${escapeHtml(p.title || "")}</strong>${p.company ? ` · ${escapeHtml(p.company)}` : ""} <span class="muted">${escapeHtml(p.reason || "")}</span>
+    <button type="button" class="btn small" data-park="open" data-uid="${escapeHtml(p.uid)}">Open tab</button>
+    <button type="button" class="btn small" data-park="continue" data-uid="${escapeHtml(p.uid)}">Done, continue</button>
+    <button type="button" class="btn small" data-park="skip" data-uid="${escapeHtml(p.uid)}">Skip</button></li>`).join("")}</ul></div>` : "";
   $("autoStop").hidden = !s.running;
   $("autoBtn").disabled = s.running;
   document.querySelectorAll("[data-autoapply]").forEach((b) => (b.disabled = s.running));
@@ -1006,6 +1022,13 @@ $("autoStop").addEventListener("click", () => autoCommand("stop"));
 $("autoContinue").addEventListener("click", () => autoCommand("continue"));
 $("autoSkip").addEventListener("click", () => autoCommand("skip"));
 $("autoClose").addEventListener("click", () => ($("autoPanel").hidden = true));
+document.addEventListener("click", (e) => {  // a set-aside job's Open tab / Done, continue / Skip
+  const b = e.target.closest("[data-park]");
+  if (!b) return;
+  b.disabled = true;
+  fetch("/api/autoapply/command", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: b.dataset.park, uid: b.dataset.uid }) }).finally(() => setTimeout(() => (b.disabled = false), 4000));
+});
 detailEl.addEventListener("click", (e) => {
   const b = e.target.closest("[data-autoapply]");
   if (b) startAutoApply([b.dataset.autoapply]);

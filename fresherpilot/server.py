@@ -1080,24 +1080,25 @@ def autoapply_event(body: AutoApplyEvent) -> dict:
 
 
 class AutoApplyCommand(BaseModel):
-    action: str  # continue | skip | stop
+    action: str  # continue | skip | stop (run) ; continue | skip | open (one set-aside job, with uid)
+    uid: str | None = None
 
 
 @app.post("/api/autoapply/command")
 def autoapply_command(body: AutoApplyCommand) -> dict:
     from fresherpilot.apply import autoapply
 
-    if body.action not in ("continue", "skip", "stop"):
-        raise HTTPException(status_code=400, detail="action must be continue, skip or stop")
-    autoapply.command(body.action)
+    if body.action not in ("continue", "skip", "stop", "open"):
+        raise HTTPException(status_code=400, detail="action must be continue, skip, stop or open")
+    autoapply.command(body.action, body.uid)
     return {"ok": True}
 
 
 @app.get("/api/autoapply/command")
-def autoapply_take_command() -> dict:
+def autoapply_take_command(uid: str | None = None) -> dict:
     from fresherpilot.apply import autoapply
 
-    return {"command": autoapply.take_command()}
+    return {"command": autoapply.take_command(uid)}
 
 
 # ---------------------------------------------------------------- dashboard + outreach

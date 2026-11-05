@@ -31,6 +31,9 @@ STATE: dict[str, Any] = {
     "running": False, "mode": None, "queue": [], "total": 0, "index": 0,
     "applied": 0, "skipped": 0, "failed": 0, "current": None, "waiting": None,
     "log": [], "command": None,
+    # Jobs set aside because they need you (sign in, CAPTCHA, a question, a form to submit): the run goes on with
+    # the next job and comes back to these when you've done it or press Continue on one. uid -> info / command.
+    "parked": {}, "job_commands": {},
 }
 _lock = threading.Lock()
 
@@ -167,7 +170,7 @@ def start(uids: list[str] | None, max_jobs: int = 25) -> dict[str, Any]:
         queue.append(item)
     with _lock:
         STATE.update(running=True, mode="single" if single else "bulk", queue=queue, total=len(queue), index=0,
-                     applied=0, skipped=0, failed=0, current=None, waiting=None, command=None)
+                     applied=0, skipped=0, failed=0, current=None, waiting=None, command=None, parked={}, job_commands={})
     _log("start", None, f"{len(queue)} job(s) queued ({'this job' if single else 'Easy Apply first, then newest'}): "
                         f"{len(browser)} in the browser, {len(emails)} by email, {len(manual)} need you")
     for item, summary in manual:
@@ -207,8 +210,16 @@ def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any
             STATE["waiting"] = waiting or {"reason": detail}
         elif event == "resumed":
             STATE["waiting"] = None
+        elif event == "parked" and uid:
+            STATE["parked"][uid] = {**(waiting or {"reason": detail}), "uid": uid,
+                                    "title": (job or {}).get("title"), "company": (job or {}).get("company"),
+                                    "at": datetime.now(timezone.utc).isoformat()}
+            STATE["waiting"] = None
         elif event == "finished":
             STATE.update(running=False, current=None, waiting=None, command=None)
+        if event in ("applied", "skipped", "failed") and uid:
+            STATE["parked"].pop(uid, None)
+            STATE["job_commands"].pop(uid, None)
     if event == "applied" and uid:
         applicant.set_application(uid, "applied", note="auto-applied")
         from fresherpilot.jobs import visited
@@ -223,20 +234,27 @@ def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any
     return status()
 
 
-def command(action: str) -> None:
+def command(action: str, uid: str | None = None) -> None:
+    """continue / skip / stop for the run, or continue / skip / open for one set-aside job (uid)."""
     with _lock:
-        STATE["command"] = action
+        if uid:
+            STATE["job_commands"][uid] = action
+        else:
+            STATE["command"] = action
 
 
-def take_command() -> str | None:
+def take_command(uid: str | None = None) -> str | None:
     with _lock:
+        if uid:
+            return STATE["job_commands"].pop(uid, None)
         cmd, STATE["command"] = STATE["command"], None
         return cmd
 
 
 def status() -> dict[str, Any]:
     with _lock:
-        return {k: v for k, v in STATE.items() if k not in ("log", "queue")} | {"log": STATE["log"][-40:]}
+        return ({k: v for k, v in STATE.items() if k not in ("log", "queue", "parked", "job_commands")}
+                | {"log": STATE["log"][-40:], "parked": list(STATE["parked"].values())})
 
 
 # ---------------------------------------------------------------- deciding the next step
