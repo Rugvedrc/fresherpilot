@@ -377,6 +377,13 @@ BLOCK_TEXT = re.compile(r"captcha|verify you are (a )?human|are you a robot|secu
 LOGIN_URL = re.compile(r"/login|/authwall|nlogin|secure\.indeed\.com/auth|/signin|/sign-in|/register|/signup|accounts\.google", re.I)
 
 
+ALREADY_BTN = re.compile(r"^(?:✓\s*)?(?:already\s+)?applied(?:\s*✓)?(?:\s+\d+\s*\w+\s+ago|\s+on\s+.{1,15})?$"
+                         r"|^application\s+(?:already\s+)?(?:sent|submitted)$", re.I)
+ALREADY_TEXT = re.compile(r"you(?:'ve| have) already applied|already applied (?:to|for) this|you applied \d+\s*\w+ ago|"
+                          r"applied on \d{1,2}[ /-]\w{2,9}|application (?:already )?(?:sent|submitted) on|"
+                          r"\bapplied\s+\d+\s*(?:minute|hour|day|week|month)s? ago", re.I)
+
+
 def decide(body: dict[str, Any]) -> dict[str, Any]:
     """Next action for the extension, from a page snapshot."""
     from fresherpilot.jobs import llm_filter
@@ -398,6 +405,13 @@ def decide(body: dict[str, Any]) -> dict[str, Any]:
         return {"action": "needs_user", "key": "", "reason": "Sign in on this site in the opened tab"}
 
     items = snap.get("items") or []
+
+    # Already applied (Internshala shows an "Applied" button / "already applied", LinkedIn "Applied X ago",
+    # Naukri "Applied"): done, no AI call. Before any submit only, so our own confirmation isn't mistaken for it.
+    if not submitted and not filled:
+        labels = [(it.get("text") or it.get("label") or "").strip() for it in items]
+        if any(ALREADY_BTN.match(x) for x in labels) or ALREADY_TEXT.search(full):
+            return {"action": "skip", "key": "", "reason": "already applied to this job earlier"}
 
     # Obvious step, no AI call: inside a dialog, nothing left to fill, and exactly one forward button.
     if snap.get("dialog") and (filled or not snap.get("fields")):

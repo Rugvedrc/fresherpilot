@@ -323,7 +323,7 @@ async function applyJob(job, settings, mode, resumeTabId = null, token = null) {
       }
       if (decision.action === "skip") {
         // The site says you've applied before: that counts as applied, not skipped.
-        if (/already (applied|submitted)|you('ve| have) applied/i.test(decision.reason || "")) {
+        if (/already (?:been )?(applied|submitted)|you('ve| have) (already )?applied|application (was |has been )?(already )?(sent|submitted) (earlier|before|\d)/i.test(decision.reason || "")) {
           return { event: "applied", detail: "already applied earlier" };
         }
         // "No apply button" is often content that appears only after scrolling: look once more.
