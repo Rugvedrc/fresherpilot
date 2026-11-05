@@ -129,6 +129,10 @@ def li_apply_mode(page_html: str) -> str:
         return "site"
     if "apply-link-onsite" in page_html or "apply-link-simple_onsite" in page_html:
         return "easy"
+    # No company-site link, only "sign in to apply" (guest-to-member-job-apply): LinkedIn's own Easy Apply, which it
+    # hides from signed-out visitors (Nov 5: e.g. Carborax "Developer"; company-site jobs always show the offsite link).
+    if "guest-to-member-job-apply" in page_html:
+        return "easy"
     return ""
 
 

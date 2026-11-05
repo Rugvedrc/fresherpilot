@@ -1078,6 +1078,21 @@ def autoapply_set_choice(body: AutoApplyChoice) -> dict:
     return autoapply.set_choice(body.action, body.company, body.uid)
 
 
+@app.post("/api/autoapply/tag")
+def autoapply_tag() -> dict:
+    """Find out which LinkedIn jobs are Easy Apply (opens each untagged job's public page once, in the background)."""
+    from fresherpilot.apply import autoapply
+
+    return autoapply.start_tagging()
+
+
+@app.get("/api/autoapply/tag")
+def autoapply_tag_status() -> dict:
+    from fresherpilot.apply import autoapply
+
+    return autoapply.tag_status()
+
+
 @app.get("/api/autoapply/preview")
 def autoapply_preview() -> dict:
     from fresherpilot.apply import autoapply

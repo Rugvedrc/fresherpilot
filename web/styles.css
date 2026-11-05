@@ -494,3 +494,14 @@ details.datatable th:first-child, details.datatable td:first-child { text-align:
 .undo-apply:hover { color: var(--bad); }
 .applied-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; padding: 8px 12px; border: 1px dashed var(--line-strong); border-radius: var(--radius); font-size: 0.86rem; color: var(--muted); }
 .applied-ask span { margin-right: auto; }
+
+/* Fetch progress card: every board, LinkedIn searches, the AI check, overall % and time left */
+.fetch-card { margin: 10px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.fetch-card .fc-head { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: baseline; }
+.fetch-card .fc-bar { height: 10px; border-radius: 99px; background: var(--line); overflow: hidden; margin: 8px 0; }
+.fetch-card .fc-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .5s; }
+.fetch-card .fc-steps { display: flex; flex-wrap: wrap; gap: 6px; }
+.fetch-card .fc-step { font-size: .85rem; border: 1px solid var(--line); border-radius: 99px; padding: 3px 10px; color: var(--text-2); }
+.fetch-card .fc-step.done { border-color: var(--accent); color: var(--text); }
+.fetch-card .fc-step.busy { border-color: var(--line-strong); color: var(--text); font-weight: 600; }
+.fetch-card .fc-step.err { border-color: #d97706; }

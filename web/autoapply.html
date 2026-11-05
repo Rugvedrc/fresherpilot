@@ -43,6 +43,10 @@
       .aa .mini:hover { color: var(--text); text-decoration: underline; }
       .aa details { margin: 8px 0; }
       .aa summary { cursor: pointer; }
+      .aa .tagbox { border: 1px dashed var(--line-strong); border-radius: 10px; padding: 10px 12px; margin: 8px 0 12px; }
+      .aa .easy-cta { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 4px 0 14px; padding: 12px;
+                      border-radius: 12px; background: var(--accent-soft); }
+      .aa .btn.big { font-size: 1.05rem; padding: 10px 18px; }
       .aa .logwrap { max-height: 520px; overflow: auto; }
     </style>
   </head>
@@ -57,6 +61,16 @@
       <section class="panel">
         <div id="chooser">
           <h2 style="margin-top:0">Choose what to apply to</h2>
+          <div id="tagBox" class="tagbox" hidden>
+            <div class="row" style="justify-content:space-between"><b id="tagText">Finding Easy Apply jobs…</b><span class="small muted" id="tagEta"></span></div>
+            <div class="bar"><i id="tagBar"></i></div>
+            <div class="small muted">Opens each LinkedIn job's public page once to see if it's Easy Apply or the company's site
+              (and leaves out closed ones). You can start already; the list updates as it goes.</div>
+          </div>
+          <div class="easy-cta" id="easyCta" hidden>
+            <button class="btn primary big" type="button" id="easyBtn">⚡ Apply to all Easy Apply jobs</button>
+            <span class="small muted" id="easyNote"></span>
+          </div>
           <div id="platforms" class="row"><span class="small muted">Loading jobs…</span></div>
           <div class="row" style="margin:10px 0">
             <label class="small">Found

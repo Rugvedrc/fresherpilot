@@ -308,6 +308,69 @@ def _easy_first(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(jobs, key=key)  # stable: keeps newest first inside each group
 
 
+# ---------------------------------------------------------------- Easy Apply or company site?
+# LinkedIn shows it only on the job page (Apply button: onsite = Easy Apply, offsite = company site). Jobs read
+# before Nov 5 have no tag (measured: 3 of 230 approved LinkedIn jobs). This opens each untagged one's public page
+# once (~2.5 s each, LinkedIn's guest pace, free), saves the tag, and leaves out jobs that are closed or removed.
+TAG: dict[str, Any] = {"running": False, "done": 0, "total": 0, "easy": 0, "site": 0, "closed": 0, "started": None,
+                       "finished": None, "error": None}
+_CLOSED_LI = re.compile(r"no longer accepting applications", re.I)
+
+
+def tag_status() -> dict[str, Any]:
+    return dict(TAG)
+
+
+def start_tagging() -> dict[str, Any]:
+    from fresherpilot.core import users
+
+    if TAG["running"]:
+        return tag_status()
+    todo = [j for j in eligible_jobs(include_with_instructions=True) if j.get("source") == "LinkedIn" and not j.get("apply_mode")]
+    TAG.update(running=bool(todo), done=0, total=len(todo), easy=0, site=0, closed=0, started=time.time(),
+               finished=None if todo else time.time(), error=None)
+    if todo:
+        users.thread(_tag_linkedin, todo)
+    return tag_status()
+
+
+def _tag_linkedin(todo: list[dict[str, Any]]) -> None:
+    import requests
+
+    from fresherpilot.jobs import apify_jobs, free_boards
+
+    session = requests.Session()
+    batch: dict[str, dict[str, Any]] = {}
+    try:
+        for j in todo:
+            try:
+                r = free_boards._li_get(session, free_boards._LI_JOB.format(j["id"]))
+            except free_boards.Blocked as exc:
+                TAG["error"] = str(exc)
+                break
+            except Exception:  # noqa: BLE001 — one page's problem: next job
+                r = None
+            if r is None:  # 404: the job was removed
+                remember_never(j["uid"], "LinkedIn: job removed", {"title": j.get("title"), "company": _company(j), "source": "LinkedIn"})
+                TAG["closed"] += 1
+            elif _CLOSED_LI.search(r.text):
+                remember_never(j["uid"], "LinkedIn: no longer accepting applications",
+                               {"title": j.get("title"), "company": _company(j), "source": "LinkedIn"})
+                TAG["closed"] += 1
+            else:
+                mode = free_boards.li_apply_mode(r.text)
+                if mode:
+                    batch[j["uid"]] = {"apply_mode": mode}
+                    TAG[mode] += 1
+            TAG["done"] += 1
+            if len(batch) >= 10:
+                apify_jobs.set_fields(batch)
+                batch = {}
+    finally:
+        apify_jobs.set_fields(batch)
+        TAG.update(running=False, finished=time.time())
+
+
 def preview() -> dict[str, Any]:
     """Jobs Auto-apply would do, per platform (for the platform checkboxes on the Auto-apply page)."""
     from fresherpilot.outreach.telegram_bot import apply_mode
@@ -323,7 +386,8 @@ def preview() -> dict[str, Any]:
                      "mode": apply_mode(j), "url": j.get("url")})
     order = list(_EASY_ORDER) + ["Careers", "Telegram"]
     return {"platforms": [{"source": k, **v} for k, v in sorted(per.items(), key=lambda kv: (order.index(kv[0]) if kv[0] in order else 99, kv[0]))],
-            "jobs": jobs, **choices()}
+            "jobs": jobs, "untagged": sum(1 for x in jobs if x["source"] == "LinkedIn" and not x["mode"]), "tag": tag_status(),
+            **choices()}
 
 
 def start(uids: list[str] | None, max_jobs: int = 0, sources: list[str] | None = None,

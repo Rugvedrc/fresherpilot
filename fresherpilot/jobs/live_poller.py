@@ -43,7 +43,7 @@ def status() -> dict[str, Any]:
     busy = [b for b, info in s["boards"].items() if info.get("busy")]
     sweep = s.get("sweep")
     return {"running": s["running"], "boards": s["boards"], "pending_check": s["pending"], "busy": busy,
-            "linkedin_round": dict(sweep) if sweep else None}
+            "linkedin_round": dict(sweep) if sweep else None, "manual": dict(s["manual"]) if s.get("manual") else None}
 
 
 _sync_started: set[str] = set()
@@ -151,6 +151,9 @@ def run_once(start_checker: Callable[[], Any], start_fetch: Callable[[], Any]) -
         s = _state[uid] = _new_state(start_checker, start_fetch)
     searches = _li_searches() if "linkedin" in cfg.LIVE_BOARDS else []
     s["sweep"] = {"done": 0, "total": len(searches)}
+    # For the progress card: which boards this fetch reads, when it started (ETA) and finished.
+    s["manual"] = {"started": time.time(), "finished": None, "li_total": len(searches),
+                   "boards": [b for b in _SLOW_BOARDS if b in cfg.LIVE_BOARDS] + (["linkedin"] if searches else [])}
 
     def one_board(board: str) -> None:
         now = time.time()
@@ -187,6 +190,7 @@ def run_once(start_checker: Callable[[], Any], start_fetch: Callable[[], Any]) -
                 t.join(timeout=600)
         _save_state(s)
         s["sweep"] = None
+        s["manual"]["finished"] = time.time()
         s["running"] = False
         if s["pending"]:
             s["check"]()

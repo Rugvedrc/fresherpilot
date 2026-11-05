@@ -177,6 +177,12 @@ function renderChooser() {
   }
   const list = shown();
   const n = list.filter((x) => !off.has(x.uid)).length;
+  const easy = list.filter((x) => x.mode === "easy" && !off.has(x.uid));
+  $("easyCta").hidden = !P.jobs.length;
+  $("easyBtn").textContent = easy.length ? `⚡ Apply to all ${easy.length} Easy Apply job${easy.length === 1 ? "" : "s"}` : "⚡ No Easy Apply jobs in this selection";
+  $("easyBtn").disabled = !easy.length;
+  $("easyNote").textContent = "LinkedIn Easy Apply, Naukri apply, Indeed Apply, Wellfound… quick forms inside the job site."
+    + (P.tag?.running ? " More are being found right now." : P.untagged ? ` ${P.untagged} LinkedIn jobs still unchecked.` : "");
   $("pickCount").textContent = `${n} job${n === 1 ? "" : "s"} ticked (of ${list.length} shown)`;
   $("start").textContent = n ? `▶ Apply to these ${n} job${n === 1 ? "" : "s"}` : "▶ Apply";
   $("start").disabled = !n;
@@ -202,7 +208,38 @@ async function loadChooser() {
     P = await (await fetch("/api/autoapply/preview")).json();
     $("platforms").dataset.built = "";
     renderChooser();
+    if (P.untagged && !P.tag?.running && !loadChooser.tagged) {  // find out which LinkedIn jobs are Easy Apply (once per visit)
+      loadChooser.tagged = true;
+      await fetch("/api/autoapply/tag", { method: "POST" });
+      watchTagging();
+    } else if (P.tag?.running) watchTagging();
   } catch (_) { $("platforms").innerHTML = `<span class="small muted">Couldn't load the jobs.</span>`; }
+}
+
+const mins = (s) => (s < 60 ? "under a minute" : `about ${Math.round(s / 60)} min`);
+async function watchTagging() {
+  if (watchTagging.on) return;
+  watchTagging.on = true;
+  let lastReload = Date.now();
+  try {
+    for (;;) {
+      const t = await (await fetch("/api/autoapply/tag")).json();
+      $("tagBox").hidden = !t.running;
+      if (!t.running) break;
+      const pct = t.total ? Math.round((100 * t.done) / t.total) : 0;
+      $("tagBar").style.width = `${pct}%`;
+      $("tagText").textContent = `Finding Easy Apply jobs: ${t.done} of ${t.total} checked · ${t.easy} Easy Apply, ${t.site} company site, ${t.closed} closed`;
+      const el = t.started ? Date.now() / 1000 - t.started : 0;
+      $("tagEta").textContent = t.done > 2 ? `${mins((el / t.done) * (t.total - t.done))} left` : "";
+      if (Date.now() - lastReload > 30000) { lastReload = Date.now(); await loadChooserQuiet(); }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } finally { watchTagging.on = false; }
+  await loadChooserQuiet();
+  toast("Easy Apply check finished");
+}
+async function loadChooserQuiet() {  // refresh the list without restarting the check
+  try { P = await (await fetch("/api/autoapply/preview")).json(); $("platforms").dataset.built = ""; renderChooser(); } catch (_) { /* next time */ }
 }
 const loadPlatforms = loadChooser;  // (render() reloads it after a run)
 
@@ -235,11 +272,13 @@ document.addEventListener("click", (e) => {
 });
 { const h = store.get(HOURS_KEY); if (h !== null) $("hours").value = h; }
 
-$("start").onclick = async () => {
+$("start").onclick = () => startRun(picked().map((x) => x.uid), "");
+$("easyBtn").onclick = () => startRun(picked().filter((x) => x.mode === "easy").map((x) => x.uid), "Easy Apply ");
+
+async function startRun(pick, what) {
   if (!hasExtension()) return alert("The FresherPilot extension isn't active on this page. Reload it in chrome://extensions, then refresh this page.");
-  const pick = picked().map((x) => x.uid);
   if (!pick.length) return alert("Tick at least one job.");
-  if (!confirm(`Apply to ${pick.length} job${pick.length === 1 ? "" : "s"}, one by one in background tabs?\nEasy Apply first. Jobs that need you wait in “Waiting for you” while it goes on.`)) return;
+  if (!confirm(`Apply to ${pick.length} ${what}job${pick.length === 1 ? "" : "s"}, one by one in background tabs?\nJobs that need you wait in “Waiting for you” while it goes on.`)) return;
   try {
     const res = await fetch("/api/autoapply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max: 0, pick }) });
     const start = await res.json();
@@ -252,7 +291,7 @@ $("start").onclick = async () => {
     toast("Started ▶");
   } catch (err) { alert(err.message); }
   refresh();
-};
+}
 
 document.addEventListener("click", async (e) => {
   if (e.target.id !== "resetBtn") return;

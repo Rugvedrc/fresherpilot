@@ -33,6 +33,11 @@
       <p id="usage" class="status small" title="Groq's free tier allows 200,000 tokens per model per day"></p>
       <div id="progress" class="progress" hidden><div id="progressFill"></div></div>
     </div>
+    <section id="fetchCard" class="fetch-card" hidden aria-live="polite">
+      <div class="fc-head"><strong id="fcTitle">Fetching jobs…</strong><span id="fcEta" class="muted small"></span></div>
+      <div class="fc-bar"><i id="fcBar"></i></div>
+      <div id="fcSteps" class="fc-steps"></div>
+    </section>
     <div id="setupBanner" class="setup-banner" hidden><strong id="setupText"></strong><a class="btn primary small" href="/onboarding">Finish setup</a></div>
     <p id="errors" class="errors" hidden></p>
     <section id="autoPanel" class="auto-panel" hidden>

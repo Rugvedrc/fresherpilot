@@ -657,10 +657,15 @@ def prefs() -> dict[str, Any]:
     """What to search for and how to judge jobs, for the current user (made from the resume)."""
     from fresherpilot.core import search_config as cfg
 
+    uid = current() or ""
+    quick = _prefs_quick.get(uid)
+    if quick and time.time() - quick[0] < 2.0:  # called per job in list builds: look at the file at most every 2 s
+        return quick[1]
     p = path("search_prefs.json")
     mtime = p.stat().st_mtime if p.exists() else 0.0
     hit = _prefs_cache.get(str(p))
     if hit and hit[0] == mtime:
+        _prefs_quick[uid] = (time.time(), hit[1])
         return hit[1]
     saved: dict[str, Any] = {}
     if p.exists():
@@ -670,10 +675,12 @@ def prefs() -> dict[str, Any]:
             saved = {}
     merged = {**cfg.DEFAULT_PREFS, **saved}
     _prefs_cache[str(p)] = (mtime, merged)
+    _prefs_quick[uid] = (time.time(), merged)
     return merged
 
 
 _prefs_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_prefs_quick: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def save_prefs(changes: dict[str, Any]) -> dict[str, Any]:
@@ -682,6 +689,7 @@ def save_prefs(changes: dict[str, Any]) -> dict[str, Any]:
     cur = prefs()
     cur.update({k: v for k, v in changes.items() if k in cfg.DEFAULT_PREFS})
     write_atomic(path("search_prefs.json"), json.dumps(cur, indent=1, ensure_ascii=False))
+    _prefs_quick.pop(current() or "", None)  # the next prefs() reads the new file
     return cur
 
 

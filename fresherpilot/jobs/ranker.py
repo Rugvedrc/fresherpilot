@@ -11,7 +11,7 @@ import html
 import re
 
 
-@functools.lru_cache(maxsize=16384)  # the job list cleans the same ~6000 descriptions on every refresh
+@functools.lru_cache(maxsize=65536)  # each list build cleans ~20k texts (10k jobs x title + description): 16k thrashed (Nov 5: 6 s per build)
 def strip_html(text: str) -> str:
     if not text:
         return ""

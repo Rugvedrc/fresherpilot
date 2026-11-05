@@ -984,6 +984,24 @@ def merge_external(items: list[dict[str, Any]], kind: str, check_location: bool 
     return {"added": added, "duplicates": dupes, "other_city": other_city}
 
 
+def set_fields(updates: dict[str, dict[str, Any]]) -> int:
+    """updates = {"<source>:<id>": {field: value}}: changes saved jobs in place (e.g. apply_mode found later)."""
+    if not updates:
+        return 0
+    n = 0
+    with _CACHE_LOCK:
+        payload = load_cache()
+        if not payload:
+            return 0
+        for job in payload.get("jobs") or []:
+            change = updates.get(f"{job.get('source')}:{job.get('id')}")
+            if change:
+                job.update(change)
+                n += 1
+        _users_mod().write_atomic(_cache_path(), json.dumps(payload, indent=2))
+    return n
+
+
 def naukri_sweep_plan() -> dict[str, Any]:
     """Naukri search pages for the extension to read in the user's own browser (free, no Apify).
     Every role, experience 0 and 1 (so "1-3 years" jobs come in too), the user's cities (+ Remote),

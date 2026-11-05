@@ -672,6 +672,67 @@ function showProgress(st) {
   $("progressFill").style.width = pct === null ? "" : `${pct}%`;
 }
 
+// The fetch progress card (manual "Fetch new jobs"): each board, LinkedIn searches, then the AI check of what was
+// found; overall % (reading = 75%, AI check = 25%) and time left from the pace so far.
+const CARD_NAMES = { linkedin: "LinkedIn", indeed: "Indeed", internshala: "Internshala", wellfound: "Wellfound", telegram: "Telegram", careers: "Company pages" };
+let cardHideAt = 0;
+function renderFetchCard(st) {
+  const card = $("fetchCard");
+  const m = st?.live?.manual;
+  if (!m) { card.hidden = true; return; }
+  const boards = st.live.boards || {};
+  const started = m.started * 1000;
+  const after = (b) => boards[b] && Date.parse(boards[b].at || 0) >= started - 1000;
+  let units = 0, done = 0, found = 0;
+  const steps = m.boards.map((b) => {
+    const info = boards[b] || {};
+    const busy = !!info.busy;
+    const finished = !busy && after(b) && (b !== "linkedin" || m.finished);
+    if (after(b)) found += info.added || 0;
+    if (b === "linkedin") {
+      const r = st.live.linkedin_round;
+      const d = m.finished ? m.li_total : r ? r.done : 0;
+      units += m.li_total; done += d;
+      return `<span class="fc-step ${finished ? "done" : "busy"}">${finished ? "✓" : "⏳"} LinkedIn ${d}/${m.li_total} searches${info.added && after(b) ? ` · ${info.added} new` : ""}</span>`;
+    }
+    units += 1; done += finished ? 1 : 0;
+    const err = finished && info.error;
+    return `<span class="fc-step ${err ? "err" : finished ? "done" : busy ? "busy" : ""}"${err ? ` title="Couldn't read it this time: ${escapeHtml(String(info.error).slice(0, 160))}"` : ""}>${err ? "⚠" : finished ? "✓" : busy ? "⏳" : "·"} ${CARD_NAMES[b] || b}${finished && info.added ? ` · ${info.added} new` : ""}</span>`;
+  });
+  const readFrac = m.finished ? 1 : units ? done / units : 0;
+  const c = st.check || {};
+  const aiOn = c.running && c.total;
+  // The AI check also runs on batches while reading; it only counts toward the % once reading is finished,
+  // so the bar never jumps back.
+  const aiFrac = !m.finished ? 0 : aiOn ? c.done / c.total : !c.running ? 1 : 0;
+  steps.push(`<span class="fc-step ${aiOn ? "busy" : m.finished && !c.running ? "done" : ""}">${aiOn ? "⏳" : m.finished && !c.running ? "✓" : "·"} AI check${aiOn ? ` ${c.done}/${c.total}` : ""}</span>`);
+  const pct = Math.round(100 * (0.75 * readFrac + 0.25 * aiFrac));
+  const all = m.finished && !c.running;
+  if (all && !cardHideAt) cardHideAt = Date.now() + 60000;
+  if (!all) cardHideAt = 0;
+  card.hidden = all && Date.now() > cardHideAt;
+  const secs = (Date.now() - started) / 1000;
+  let eta = "";
+  if (!all) {
+    if (!m.finished && readFrac > 0.05) eta = `reading: ${fmtLeft((secs / readFrac) * (1 - readFrac))} left, then the AI check`;
+    else if (m.finished && aiOn) {
+      renderFetchCard.aiStart ||= Date.now();
+      renderFetchCard.aiFrom ??= c.done;
+      const did = c.done - renderFetchCard.aiFrom, took = (Date.now() - renderFetchCard.aiStart) / 1000;
+      eta = did > 0 ? `AI check: ${fmtLeft((took / did) * (c.total - c.done))} left` : "AI check running…";
+    } else eta = m.finished ? "finishing…" : "estimating time left…";
+  } else { renderFetchCard.aiStart = undefined; renderFetchCard.aiFrom = undefined; }
+  $("fcTitle").textContent = all ? `✓ Fetch done in ${fmtLeft(((m.finished * 1000) - started) / 1000)}: ${found} new job${found === 1 ? "" : "s"} found` : `Fetching jobs… ${pct}%`;
+  $("fcEta").textContent = eta;
+  $("fcBar").style.width = `${all ? 100 : pct}%`;
+  $("fcSteps").innerHTML = steps.join("");
+}
+function fmtLeft(s) {
+  if (!Number.isFinite(s)) return "a moment";
+  s = Math.max(0, Math.round(s));
+  return s < 60 ? `${s} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+}
+
 function setFetchButton(st) {
   const busy = !!(st?.fetch?.running || liveBusy(st).length);
   fetchBtn.classList.toggle("busy", busy);
@@ -733,6 +794,7 @@ async function pollTask() {
       }
       setFetchButton(st);
       showProgress(st);
+      renderFetchCard(st);
       const parts = [describeFetch(st), describeCheck(st.check)].filter(Boolean);
       if (parts.length) statusEl.textContent = parts.join(" · ");
       // New jobs after a fetch, and new AI results, show up in the list as they arrive.
@@ -754,6 +816,7 @@ async function pollTask() {
     if (err) statusEl.textContent += ` (${err})`;
   } finally {
     $("progress").hidden = true;
+    setTimeout(() => { if (!polling) $("fetchCard").hidden = true; }, 60000);  // the "✓ done" card stays a minute
     setFetchButton(null);
     polling = false;
   }
