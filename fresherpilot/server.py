@@ -484,6 +484,11 @@ def onboarding_page() -> FileResponse:
     return FileResponse(STATIC / "onboarding.html")
 
 
+@app.get("/autoapply")
+def autoapply_page() -> FileResponse:
+    return FileResponse(STATIC / "autoapply.html")
+
+
 @app.get("/account")
 def account_page() -> FileResponse:
     return FileResponse(STATIC / "account.html")
@@ -1088,8 +1093,8 @@ class AutoApplyCommand(BaseModel):
 def autoapply_command(body: AutoApplyCommand) -> dict:
     from fresherpilot.apply import autoapply
 
-    if body.action not in ("continue", "skip", "stop", "open"):
-        raise HTTPException(status_code=400, detail="action must be continue, skip, stop or open")
+    if body.action not in ("continue", "skip", "stop", "open", "applied", "pause", "resume"):
+        raise HTTPException(status_code=400, detail="action must be continue, skip, stop, open, applied, pause or resume")
     autoapply.command(body.action, body.uid)
     return {"ok": True}
 

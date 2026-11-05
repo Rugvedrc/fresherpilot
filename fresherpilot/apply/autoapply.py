@@ -33,7 +33,7 @@ STATE: dict[str, Any] = {
     "log": [], "command": None,
     # Jobs set aside because they need you (sign in, CAPTCHA, a question, a form to submit): the run goes on with
     # the next job and comes back to these when you've done it or press Continue on one. uid -> info / command.
-    "parked": {}, "job_commands": {},
+    "parked": {}, "job_commands": {}, "final": [], "paused": False, "current_at": None,
 }
 _lock = threading.Lock()
 
@@ -208,7 +208,8 @@ def start(uids: list[str] | None, max_jobs: int = 0) -> dict[str, Any]:
         queue.append(item)
     with _lock:
         STATE.update(running=True, mode="single" if single else "bulk", queue=queue, total=len(queue), index=0,
-                     applied=0, skipped=0, failed=0, current=None, waiting=None, command=None, parked={}, job_commands={})
+                     applied=0, skipped=0, failed=0, current=None, waiting=None, command=None, parked={}, job_commands={},
+                     final=[], paused=False, current_at=None)
     _log("start", None, f"{len(queue)} job(s) queued ({'this job' if single else 'Easy Apply first, then newest'}): "
                         f"{len(browser)} in the browser, {len(emails)} by email, {len(manual)} need you")
     for item, summary in manual:
@@ -237,8 +238,15 @@ def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any
 
     job = next((q for q in STATE["queue"] if q["uid"] == uid), None) if uid else None
     with _lock:
+        repeat = event in ("applied", "skipped", "failed") and bool(uid) and uid in STATE["final"]
+        if event in ("applied", "skipped", "failed") and uid and not repeat:
+            STATE["final"].append(uid)
+    if repeat:  # already recorded (e.g. you pressed "I applied" before the extension reported): count each job once
+        return status()
+    with _lock:
         if event == "job_start" and job:
             STATE["current"] = job
+            STATE["current_at"] = datetime.now(timezone.utc).isoformat()
             STATE["index"] = STATE["queue"].index(job) + 1
             STATE["waiting"] = None
         elif event in ("applied", "skipped", "failed"):
@@ -254,7 +262,7 @@ def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any
                                     "at": datetime.now(timezone.utc).isoformat()}
             STATE["waiting"] = None
         elif event == "finished":
-            STATE.update(running=False, current=None, waiting=None, command=None)
+            STATE.update(running=False, current=None, waiting=None, command=None, paused=False, current_at=None)
         if event in ("applied", "skipped", "failed") and uid:
             STATE["parked"].pop(uid, None)
             STATE["job_commands"].pop(uid, None)
@@ -273,12 +281,26 @@ def report(event: str, uid: str | None, detail: str = "", waiting: dict[str, Any
 
 
 def command(action: str, uid: str | None = None) -> None:
-    """continue / skip / stop for the run, or continue / skip / open for one set-aside job (uid)."""
+    """From the Auto-apply page. Run: stop / pause / resume / skip (the current job) / applied (you applied the current
+    job yourself) / continue (single-job mode). One set-aside job (uid): open / continue / skip / applied.
+    Skip and "I applied" are recorded here at once (the counts and the list change immediately); the extension
+    closes the tab within ~2 s."""
     with _lock:
-        if uid:
+        cur = (STATE.get("current") or {}).get("uid")
+        if action in ("pause", "resume"):
+            STATE["paused"] = action == "pause"
+    if uid:
+        if action == "applied":
+            report("applied", uid, "applied by you")
+        elif action == "skip":
+            report("skipped", uid, "skipped by you")
+        with _lock:  # after the report (which clears old commands): the extension reads it and tidies up the tab
             STATE["job_commands"][uid] = action
-        else:
-            STATE["command"] = action
+        return
+    with _lock:
+        STATE["command"] = action
+    if action in ("applied", "skip") and cur and STATE.get("mode") != "single":
+        report("applied" if action == "applied" else "skipped", cur, "applied by you" if action == "applied" else "skipped by you")
 
 
 def take_command(uid: str | None = None) -> str | None:
@@ -291,8 +313,9 @@ def take_command(uid: str | None = None) -> str | None:
 
 def status() -> dict[str, Any]:
     with _lock:
-        return ({k: v for k, v in STATE.items() if k not in ("log", "queue", "parked", "job_commands")}
-                | {"log": STATE["log"][-40:], "parked": list(STATE["parked"].values())})
+        nxt = [{k: q.get(k) for k in ("uid", "title", "company", "source", "kind")} for q in STATE["queue"][STATE["index"]:STATE["index"] + 8]]
+        return ({k: v for k, v in STATE.items() if k not in ("log", "queue", "parked", "job_commands", "final")}
+                | {"log": STATE["log"][-200:], "parked": list(STATE["parked"].values()), "next": nxt})
 
 
 # ---------------------------------------------------------------- deciding the next step

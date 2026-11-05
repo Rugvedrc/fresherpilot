@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FresherPilot · Auto-apply</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+      .aa { max-width: 1100px; margin: 0 auto; padding: 16px; }
+      .aa .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 12px 0; }
+      .aa .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+      .aa .stat b { display: block; font-size: 1.5rem; }
+      .aa .bar { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; margin: 8px 0 4px; }
+      .aa .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .4s; }
+      .aa .panel { margin: 12px 0; }
+      .aa .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+      .aa .job { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+                 border-top: 1px solid var(--line); padding: 10px 0; }
+      .aa .job:first-child { border-top: 0; }
+      .aa .job .who { min-width: 0; flex: 1 1 260px; }
+      .aa .job .who b { overflow-wrap: anywhere; }
+      .aa .why { color: var(--text-2); font-size: .9rem; overflow-wrap: anywhere; }
+      .aa .chip { border: 1px solid var(--line-strong); border-radius: 99px; padding: 3px 10px; background: transparent;
+                  color: var(--text); cursor: pointer; font: inherit; font-size: .85rem; }
+      .aa .chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+      .aa table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+      .aa td { border-top: 1px solid var(--line); padding: 6px 4px; vertical-align: top; overflow-wrap: anywhere; }
+      .aa td.t { white-space: nowrap; color: var(--text-2); }
+      .aa .busy { opacity: .55; pointer-events: none; }
+      .aa .warn { color: #b45309; }
+      .aa .empty { color: var(--text-2); padding: 6px 0; }
+      .aa #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+                   padding: 8px 14px; border-radius: 8px; display: none; max-width: calc(100% - 32px); }
+      .aa .logwrap { max-height: 520px; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <main class="aa">
+      <header class="brand"><span class="logo" aria-hidden="true">JF</span>
+        <div><h1>Auto-apply</h1><p class="tagline" id="state">Loading…</p></div>
+        <div class="row" style="margin-left:auto"><a class="btn" href="/">← Jobs</a></div>
+      </header>
+
+      <section class="panel">
+        <div class="row" id="controls">
+          <button class="btn primary" id="start">▶ Start: apply to all approved jobs</button>
+          <button class="btn" id="pause">⏸ Pause</button>
+          <button class="btn" id="resume">▶ Resume</button>
+          <button class="btn" id="stop">⏹ Stop</button>
+        </div>
+        <div class="bar"><i id="bar"></i></div>
+        <div class="small muted" id="progress"></div>
+        <div class="grid">
+          <div class="stat"><span class="small muted">Applied</span><b id="nApplied">0</b></div>
+          <div class="stat"><span class="small muted">Emailed</span><b id="nEmailed">0</b></div>
+          <div class="stat"><span class="small muted">Waiting for you</span><b id="nParked">0</b></div>
+          <div class="stat"><span class="small muted">Skipped</span><b id="nSkipped">0</b></div>
+          <div class="stat"><span class="small muted">Failed</span><b id="nFailed">0</b></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Now applying</h2>
+        <div id="current" class="empty">Nothing running.</div>
+      </section>
+
+      <section class="panel">
+        <h2>✋ Waiting for you <span class="small muted">(tabs left open: finish them, then tell the app)</span></h2>
+        <div id="parked" class="empty">Nothing waiting.</div>
+      </section>
+
+      <section class="panel">
+        <h2>Up next</h2>
+        <div id="next" class="empty">—</div>
+      </section>
+
+      <section class="panel">
+        <div class="row" style="justify-content:space-between"><h2 style="margin:0">Activity</h2>
+          <div class="row" id="filters">
+            <button class="chip" data-f="" aria-pressed="true">All</button>
+            <button class="chip" data-f="applied" aria-pressed="false">✅ Applied</button>
+            <button class="chip" data-f="emailed" aria-pressed="false">📧 Emailed</button>
+            <button class="chip" data-f="skipped" aria-pressed="false">⏭ Skipped</button>
+            <button class="chip" data-f="failed" aria-pressed="false">⚠ Failed</button>
+            <button class="chip" data-f="parked" aria-pressed="false">✋ Set aside</button>
+          </div></div>
+        <div class="logwrap"><table><tbody id="log"></tbody></table></div>
+      </section>
+      <div id="toast" role="status"></div>
+    </main>
+    <script src="/static/autoapply.js"></script>
+  </body>
+</html>

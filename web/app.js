@@ -962,7 +962,7 @@ function renderAuto(s) {
     <button type="button" class="btn small" data-park="continue" data-uid="${escapeHtml(p.uid)}">Done, continue</button>
     <button type="button" class="btn small" data-park="skip" data-uid="${escapeHtml(p.uid)}">Skip</button></li>`).join("")}</ul></div>` : "";
   $("autoStop").hidden = !s.running;
-  $("autoBtn").disabled = s.running;
+  if ($("autoBtn")) $("autoBtn").disabled = s.running;
   document.querySelectorAll("[data-autoapply]").forEach((b) => (b.disabled = s.running));
   $("autoLog").innerHTML = (s.log || [])
     .slice()
@@ -1017,7 +1017,7 @@ async function startAutoApply(uids) {
 const autoCommand = (action) =>
   fetch("/api/autoapply/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) });
 
-$("autoBtn").addEventListener("click", () => startAutoApply(null));
+if ($("autoBtn")) $("autoBtn").addEventListener("click", () => startAutoApply(null));
 $("autoStop").addEventListener("click", () => autoCommand("stop"));
 $("autoContinue").addEventListener("click", () => autoCommand("continue"));
 $("autoSkip").addEventListener("click", () => autoCommand("skip"));

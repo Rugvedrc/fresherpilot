@@ -124,7 +124,7 @@ async function inject(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js", "agent.js"] });
 }
 
-async function waitForLoad(tabId, timeout = 25000) {
+async function waitForLoad(tabId, timeout = 15000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -144,7 +144,7 @@ const status = (tabId, text, waiting = false) =>
 
 // Read the page; if it navigated or reloaded in between (helpers gone), re-inject and retry.
 async function takeSnapshot(tabId) {
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 3; i++) {
     const snap = await inTab(tabId, () => (window.__jfAgent ? window.__jfAgent.snapshot() : null)).catch(() => null);
     if (snap) return snap;
     await sleep(1500);
@@ -159,14 +159,14 @@ const scrolledPages = new Set(); // tabId|url already scrolled through once
 async function ready(tabId) {
   await waitForLoad(tabId);
   await inject(tabId);
-  const r = await inTab(tabId, () => window.__jfAgent.waitReady(30000));
+  const r = await inTab(tabId, () => window.__jfAgent.waitReady(15000));
   // First visit to a page: scroll through it once so lazy-loaded buttons exist.
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   const key = `${tabId}|${(tab?.url || "").split("#")[0]}`;
   if (tab && !scrolledPages.has(key)) {
     scrolledPages.add(key);
     await inTab(tabId, () => window.__jfAgent.scrollThrough()).catch(() => null);
-    await inTab(tabId, () => window.__jfAgent.waitReady(8000, 500)).catch(() => null);
+    await inTab(tabId, () => window.__jfAgent.waitReady(5000, 500)).catch(() => null);
   }
   return r;
 }
@@ -220,21 +220,40 @@ async function needsYou(tabId, job, reason, kind, mode) {
 }
 
 // A job may not hold up "Auto-apply all": after JOB_MAX_MS it's set aside (tab left open, in "Waiting for you")
-// and the run goes on. The abandoned attempt stops at its next step (`cancelled`) and leaves the tab alone.
+// and the run goes on. You can also end the current job any time from the Auto-apply page (Skip / I applied it /
+// Stop): the poller below cancels it within ~2 s. A cancelled attempt stops at its next step and never touches its
+// tab again (each attempt has its own token).
 const JOB_MAX_MS = 6 * 60 * 1000;
-const cancelled = new WeakSet();  // tokens of attempts that timed out (each attempt has its own)
+const cancelled = new WeakSet();
+const ctl = { current: null, stop: false, paused: false };  // current = { uid, token, end(result) }
+
+function jobTabs(uid) {
+  return Object.entries(applyingTab).filter(([, u]) => u === uid).map(([id]) => +id);
+}
+
 async function applyWithLimit(job, settings, mode, resumeTabId = null) {
   if (mode === "single") return applyJob(job, settings, mode, resumeTabId);
   const token = {};
-  let timer;
+  let timer, end;
   const attempt = applyJob(job, settings, mode, resumeTabId, token);
   const limit = new Promise((res) => { timer = setTimeout(() => res({ timedOut: true }), JOB_MAX_MS); });
-  const result = await Promise.race([attempt, limit]);
-  clearTimeout(timer);
-  if (!result.timedOut) return result;
+  const byYou = new Promise((res) => { end = res; });
+  ctl.current = { uid: job.uid, token, end };
+  let result;
+  try {
+    result = await Promise.race([attempt, limit, byYou]);
+  } finally {
+    clearTimeout(timer);
+    ctl.current = null;
+  }
+  if (!result.timedOut && !result.byYou) return result;
   cancelled.add(token);
   attempt.catch(() => {});
-  const tabs = Object.entries(applyingTab).filter(([, uid]) => uid === job.uid).map(([id]) => +id);
+  const tabs = jobTabs(job.uid);
+  if (result.byYou) {  // Skip / I applied / Stop from the page: close its tabs, the page already recorded it
+    for (const id of tabs) { delete applyingTab[id]; chrome.tabs.remove(id).catch(() => {}); }
+    return result;
+  }
   const tabId = tabs.pop();
   if (!tabId || !(await chrome.tabs.get(tabId).catch(() => null))) {
     return { event: "skipped", detail: `took over ${JOB_MAX_MS / 60000} min and its tab is gone` };
@@ -261,7 +280,17 @@ async function applyJob(job, settings, mode, resumeTabId = null, token = null) {
     const history = [];
     for (let step = 0; step < (settings.max_steps || 28); step++) {
       if (token && cancelled.has(token)) { parked = true; return { event: "skipped", detail: "timed out" }; }  // set aside meanwhile
-      const r = await ready(tabId);
+      let r;
+      try {
+        r = await ready(tabId);
+      } catch (err) {
+        if (!(await chrome.tabs.get(tabId).catch(() => null))) throw new Error("The tab was closed");
+        if (step < (settings.max_steps || 28) - 1 && /frame|removed|navigat|context|cannot access|no tab|error page/i.test(String(err.message || err))) {
+          await sleep(2000);
+          continue;  // the page reloaded while we looked at it: look again
+        }
+        throw err;
+      }
       await status(tabId, r && !r.ready ? `Page still busy (${r.reason}); continuing anyway…` : "Reading the page…");
       let snapshot = await takeSnapshot(tabId);
 
@@ -383,37 +412,52 @@ async function parkedResolved(tabId, kind) {
   }, [kind]).catch(() => false);
 }
 
-// One pass over the set-aside jobs: resume those that are ready, skip those you skipped / closed / that waited too long.
+// Reads your clicks on the Auto-apply page every 2 s while a run is going (also while a job is being applied):
+// run commands (stop / pause / resume / skip = skip the current job / applied = you applied the current job) and
+// per set-aside job (open / continue / skip / applied).
+async function pollControl(parked) {
+  const { command } = await api("/api/autoapply/command").catch(() => ({ command: null }));
+  if (command === "stop") {
+    ctl.stop = true;
+    ctl.current?.end({ byYou: true, event: "skipped", detail: "run stopped by you" });
+  } else if (command === "pause") ctl.paused = true;
+  else if (command === "resume") ctl.paused = false;
+  else if (command === "skip" && ctl.current) ctl.current.end({ byYou: true, event: "skipped", detail: "skipped by you", reported: true });
+  else if (command === "applied" && ctl.current) ctl.current.end({ byYou: true, event: "applied", detail: "applied by you", reported: true });
+  for (const [uid, p] of [...parked]) {
+    const r = await api(`/api/autoapply/command?uid=${encodeURIComponent(uid)}`).catch(() => ({ command: null }));
+    if (!r.command) continue;
+    if (r.command === "open") {
+      const tab = await chrome.tabs.get(p.tabId).catch(() => null);
+      if (tab) { await chrome.tabs.update(p.tabId, { active: true }); await chrome.windows.update(tab.windowId, { focused: true }); }
+    } else if (r.command === "applied" || r.command === "skip") {  // the page already recorded it: just tidy up
+      parked.delete(uid);
+      delete applyingTab[p.tabId];
+      if (r.command === "skip") chrome.tabs.remove(p.tabId).catch(() => {});
+    } else if (r.command === "continue") p.resume = true;
+  }
+}
+
+// One pass over the set-aside jobs: resume those that are ready, skip those whose tab is gone / that waited too long.
 async function serviceParked(parked, settings, mode) {
   for (const [uid, p] of [...parked]) {
-    const { command } = await api(`/api/autoapply/command?uid=${encodeURIComponent(uid)}`).catch(() => ({ command: null }));
+    if (ctl.stop) return;
     const tab = await chrome.tabs.get(p.tabId).catch(() => null);
-    if (command === "open" && tab) {
-      await chrome.tabs.update(p.tabId, { active: true });
-      await chrome.windows.update(tab.windowId, { focused: true });
-      continue;
-    }
     let outcome = null;
-    if (!tab) outcome = { event: "skipped", detail: "tab closed" };
-    else if (command === "skip") outcome = { event: "skipped", detail: `skipped by you (${p.reason})` };
+    if (!tab) outcome = { event: "skipped", detail: "tab closed (if you applied there, press “I applied” next time)" };
     else if (Date.now() - p.since > PARK_MAX_MS) outcome = { event: "skipped", detail: `waited ${PARK_MAX_MS / 60000} min for you (${p.reason})` };
-    else if (p.kind === "review" && (command === "continue" || (await parkedResolved(p.tabId, p.kind)))) {
+    else if (p.kind === "review" && (p.resume || (await parkedResolved(p.tabId, p.kind)))) {
       outcome = { event: "applied", detail: "form filled; submitted by you" };
-    } else if (command === "continue" || (await parkedResolved(p.tabId, p.kind))) {
+    } else if (p.resume || (await parkedResolved(p.tabId, p.kind))) {
       parked.delete(uid);
-      await report("resumed", uid, "you finished it: continuing this application");
+      await report("resumed", uid, "continuing this application");
       let result;
       try {
         result = await applyWithLimit(p.job, settings, mode, p.tabId);
       } catch (err) {
         result = { event: "failed", detail: String(err.message || err).slice(0, 200) };
       }
-      if (result.event === "parked") {
-        parked.set(uid, { job: p.job, tabId: result.tabId, kind: result.kind, reason: result.reason, since: Date.now() });
-        await report("parked", uid, result.reason, { reason: result.reason, url: "", title: p.job.title });
-      } else {
-        await report(result.event, uid, result.detail);
-      }
+      await finish(parked, p.job, result);
       continue;
     }
     if (outcome) {
@@ -425,17 +469,38 @@ async function serviceParked(parked, settings, mode) {
   }
 }
 
+async function finish(parked, job, result) {
+  if (result.event === "parked") {
+    parked.set(job.uid, { job, tabId: result.tabId, kind: result.kind, reason: result.reason, since: Date.now() });
+    await report("parked", job.uid, result.reason, { reason: result.reason, url: "", title: job.title });
+  } else if (!result.reported) {  // Skip / I applied from the page were recorded by the app already
+    await report(result.event, job.uid, result.detail);
+  }
+}
+
 async function runQueue(start) {
   if (running) return { ok: false, error: "Auto-apply is already running" };
   running = true;
+  ctl.stop = false;
+  ctl.paused = false;
   // Chrome stops idle extension workers after ~30 s; a cheap API call every 20 s keeps this run alive.
   const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000);
   const { queue, settings, mode } = start;
-  const parked = new Map();  // uid -> { job, tabId, kind, reason, since }
+  const parked = new Map();  // uid -> { job, tabId, kind, reason, since, resume }
+  let polling = false;
+  const poller = mode === "single" ? null : setInterval(async () => {
+    if (polling) return;
+    polling = true;
+    try { await pollControl(parked); } catch (_) { /* app restarting: next time */ } finally { polling = false; }
+  }, 2000);
   (async () => {
-    let stopped = false;
     try {
-      for (let i = 0; i < queue.length && !stopped; i++) {
+      for (let i = 0; i < queue.length && !ctl.stop; i++) {
+        while (ctl.paused && !ctl.stop) {  // paused from the page: set-aside jobs are still looked after
+          await sleep(2000);
+          if (parked.size) await serviceParked(parked, settings, mode);
+        }
+        if (ctl.stop) break;
         const job = queue[i];
         await report("job_start", job.uid);
         let result;
@@ -444,26 +509,22 @@ async function runQueue(start) {
         } catch (err) {
           result = { event: "failed", detail: String(err.message || err).slice(0, 200) };
         }
-        if (result.event === "parked") {
-          parked.set(job.uid, { job, tabId: result.tabId, kind: result.kind, reason: result.reason, since: Date.now() });
-          await report("parked", job.uid, result.reason, { reason: result.reason, url: "", title: job.title });
-        } else {
-          await report(result.event, job.uid, result.detail);
+        await finish(parked, job, result);
+        if (result.stop) ctl.stop = true;
+        if (mode === "single") {
+          const { command } = await api("/api/autoapply/command").catch(() => ({ command: null }));
+          if (command === "stop") ctl.stop = true;
         }
-        if (result.stop) stopped = true;
-        const { command } = await api("/api/autoapply/command").catch(() => ({ command: null }));
-        if (command === "stop") stopped = true;
-        if (parked.size) await serviceParked(parked, settings, mode);  // anything you finished meanwhile
-        if (!stopped && i < queue.length - 1) await sleep(rand(settings.between_jobs));
+        if (parked.size && !ctl.stop) await serviceParked(parked, settings, mode);  // anything you finished meanwhile
+        if (!ctl.stop && i < queue.length - 1) await sleep(rand(settings.between_jobs));
       }
       // Queue done: now only the set-aside jobs are left. Keep checking them until each is done or skipped.
-      while (parked.size && !stopped) {
-        await sleep(4000);
-        const { command } = await api("/api/autoapply/command").catch(() => ({ command: null }));
-        if (command === "stop") break;
+      while (parked.size && !ctl.stop) {
+        await sleep(3000);
         await serviceParked(parked, settings, mode);
       }
     } finally {
+      if (poller) clearInterval(poller);
       for (const [uid, p] of parked) {  // stopped with jobs still set aside: their tabs stay open for you
         delete applyingTab[p.tabId];
         await report("skipped", uid, `run stopped while it waited for you (${p.reason}); the tab is still open`);
