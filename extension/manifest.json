@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "FresherPilot Autofill",
+  "version": "1.9.2",
+  "description": "Fills job application forms from your FresherPilot profile and auto-applies in your own browser, and reads Naukri searches for the app.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "FresherPilot Autofill",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "commands": {
+    "fill-page": {
+      "suggested_key": {
+        "default": "Alt+Shift+F"
+      },
+      "description": "Fill the application form on this page"
+    }
+  }
+}

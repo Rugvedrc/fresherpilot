@@ -1,0 +1,12 @@
+# FresherPilot Cloud: job alerts that keep running while the laptop is off. Deploy: python cloud/deploy.py
+name = "fresherpilot-alerts"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+[triggers]
+crons = ["* * * * *"]   # every minute: one source step + one AI step
+
+[[d1_databases]]
+binding = "DB"
+database_name = "fresherpilot"
+database_id = "c98408d0-58a1-4ad4-9af1-c54a83842607"
